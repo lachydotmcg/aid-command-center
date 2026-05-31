@@ -23,6 +23,34 @@ function loadConfigFile() {
 }
 const fileCfg = loadConfigFile()
 const pick = (env, key, def) => process.env[env] ?? fileCfg[key] ?? def
+function asBool(value, def = false) {
+  if (value == null || value === '') return def
+  if (typeof value === 'boolean') return value
+  return /^(1|true|yes|on)$/i.test(String(value).trim())
+}
+function asList(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean)
+  return String(value).split(/[;\n]/).map(s => s.trim()).filter(Boolean)
+}
+function existingDirs(dirs) {
+  const seen = new Set()
+  return dirs.filter(d => {
+    const full = path.resolve(d)
+    if (seen.has(full)) return false
+    seen.add(full)
+    return fs.existsSync(full)
+  })
+}
+function codexSandbox(value) {
+  const allowed = new Set(['read-only', 'workspace-write', 'danger-full-access'])
+  const v = String(value || '').trim()
+  return allowed.has(v) ? v : 'workspace-write'
+}
+function cmdQuote(value) {
+  const s = String(value)
+  return /[\s&()^|<>"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s
+}
 
 const PORT        = Number(pick('ACC_PORT', 'port', 3333))
 const MEMORY_ROOT = pick('ACC_MEMORY_ROOT', 'memoryRoot',
@@ -358,6 +386,18 @@ function publicRun(r) {
   const { _proc, ...rest } = r
   return rest
 }
+function compactStderr(stderr, code) {
+  const text = String(stderr || '').trim()
+  if (!text || code === 0) return ''
+  const lines = text.split(/\r?\n/).filter(line =>
+    !/^[-]{3,}$/.test(line.trim()) &&
+    !/^(workdir|model|provider|approval|sandbox|reasoning effort|reasoning summaries|session id):/i.test(line.trim()) &&
+    !/^OpenAI Codex v/i.test(line.trim()) &&
+    !/^(user|codex|exec|tokens used)$/i.test(line.trim())
+  )
+  const compact = (lines.join('\n').trim() || text).slice(-1600)
+  return compact.length < text.length ? `[stderr tail]\n${compact}` : compact
+}
 
 // Spawns claude, parses the stream-json output, updates the run, and streams text
 // deltas via onText. Resolves with the full result once the process closes.
@@ -415,9 +455,21 @@ function runClaude({ run, args, cwd, onText }) {
 }
 
 // Sandbox policy for Codex runs. workspace-write lets an agent edit files in its
-// own project directory (exec already runs with approvals set to "never").
-// Override with ACC_CODEX_SANDBOX if a project needs broader access.
-const CODEX_SANDBOX = pick('ACC_CODEX_SANDBOX', 'codexSandbox', 'workspace-write')
+// own project directory. Use ACC_CODEX_SANDBOX=danger-full-access to match the
+// Claude runner's broad local authority for trusted automation.
+const CODEX_SANDBOX = codexSandbox(pick('ACC_CODEX_SANDBOX', 'codexSandbox', 'workspace-write'))
+const CODEX_DANGER = CODEX_SANDBOX === 'danger-full-access'
+const CODEX_DISK_FULL_READ = asBool(
+  pick('ACC_CODEX_DISK_FULL_READ', 'codexDiskFullRead', true),
+  true,
+)
+const CODEX_ADD_DIRS = existingDirs([
+  MEMORY_ROOT,
+  path.join(os.homedir(), '.codex', 'memories'),
+  ...asList(pick('ACC_CODEX_ADD_DIRS', 'codexAddDirs', [])),
+])
+console.log(`  codex sandbox -> ${CODEX_SANDBOX}${!CODEX_DANGER && CODEX_DISK_FULL_READ ? ' + disk-full-read' : ''}`)
+if (!CODEX_DANGER && CODEX_ADD_DIRS.length) console.log(`  codex add-dir -> ${CODEX_ADD_DIRS.join('; ')}`)
 
 // Runs a prompt through the OpenAI Codex CLI (codex exec). Prompt is fed via
 // stdin (avoids all shell-quoting issues); the final message is captured via -o.
@@ -426,14 +478,18 @@ const CODEX_SANDBOX = pick('ACC_CODEX_SANDBOX', 'codexSandbox', 'workspace-write
 function runCodex({ run, prompt, model, cwd, onText }) {
   return new Promise(resolve => {
     const outFile = path.join(os.tmpdir(), `codex-${run.id}-${Date.now()}.txt`)
-    const flags = ['exec', '--skip-git-repo-check', '--sandbox', CODEX_SANDBOX,
-      '-C', `"${cwd}"`, '-o', `"${outFile}"`]
-    if (model) flags.push('-m', model)
-    flags.push('-') // read prompt from stdin
-    const cmd = `"${CODEX_EXE}" ${flags.join(' ')}`
+    const args = ['exec', '--skip-git-repo-check', '--sandbox', CODEX_SANDBOX]
+    if (!CODEX_DANGER) {
+      if (CODEX_DISK_FULL_READ) args.push('-c', "sandbox_permissions=['disk-full-read-access']")
+      for (const dir of CODEX_ADD_DIRS) args.push('--add-dir', dir)
+    }
+    args.push('-C', cwd, '-o', outFile)
+    if (model && /^[\w.:-]+$/.test(model)) args.push('-m', model)
+    args.push('-') // read prompt from stdin
+    const cmd = [CODEX_EXE, ...args].map(cmdQuote).join(' ')
     const env = { ...process.env, ACC_PARENT: run.id, ACC_URL: `http://localhost:${PORT}` }
-    // shell:true because codex is a .cmd on Windows; no user input on the command
-    // line (prompt goes via stdin), so this is quoting-safe.
+    // shell:true because codex is a .cmd on Windows. Prompt goes via stdin and
+    // optional model names are pattern-checked before being placed on the command line.
     const proc = spawn(cmd, { cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'], env })
     run.pid = proc.pid; run._proc = proc
     console.log(`[run ${run.id}] codex PID ${proc.pid} agent=${run.agent} src=${run.source}${model ? ` model=${model}` : ''}`)
@@ -447,6 +503,7 @@ function runCodex({ run, prompt, model, cwd, onText }) {
       try { out = fs.readFileSync(outFile, 'utf8').trim() } catch {}
       try { fs.unlinkSync(outFile) } catch {}
       if (!out) out = stdout.trim() // fallback if -o didn't write
+      if (!out && code !== 0) out = (stderr || stdout).trim()
       const tokMatch = (stdout + '\n' + stderr).match(/tokens used[\s:]*([\d,]+)/i)
       const tokens = tokMatch ? parseInt(tokMatch[1].replace(/,/g, ''), 10) : 0
       onText?.(out) // codex has no live deltas — surface the whole result once
@@ -511,7 +568,8 @@ app.post('/run', async (req, res) => {
 
   // Allow subtasking on top-level runs by default (opt out with delegate:false).
   const r = await dispatchRun({ run, cwd, prompt, fullPrompt, continueSession, model, effort, delegate: delegate !== false, onText: t => sse({ text: t }) })
-  if (r.stderr) sse({ error: r.stderr })
+  const err = compactStderr(r.stderr, r.code)
+  if (err) sse({ error: err })
   sse({ done: true, code: r.code, cost: r.cost, codexTokens: run.codexTokens, durationMs: run.durationMs, numTurns: run.numTurns, usage: run.usage })
   res.end()
 })
@@ -883,6 +941,75 @@ app.get('/history/:agent', (req, res) => {
     }
     res.json({ messages })
   } catch { res.json({ messages: [] }) }
+})
+
+// ── Netlify form webhook ───────────────────────────────────────────────────
+// Receives Netlify form submission notifications and posts them to Discord.
+// Set NETLIFY_DISCORD_WEBHOOK to a Discord webhook URL (channel → integrations).
+// Optionally set NETLIFY_WEBHOOK_SECRET to a secret token that Netlify sends
+// via a custom header (X-Webhook-Secret) so you can verify the request origin.
+const NETLIFY_WEBHOOK_SECRET  = process.env.NETLIFY_WEBHOOK_SECRET || null
+const NETLIFY_DISCORD_WEBHOOK = process.env.NETLIFY_DISCORD_WEBHOOK || null
+
+app.post('/netlify-webhook', express.json(), async (req, res) => {
+  // Optional secret verification — compare a shared token sent in the header.
+  if (NETLIFY_WEBHOOK_SECRET) {
+    const incoming = req.get('x-webhook-secret') || req.get('x-netlify-webhook-secret') || ''
+    if (incoming !== NETLIFY_WEBHOOK_SECRET) {
+      console.warn('[netlify-webhook] rejected: bad secret')
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+  }
+
+  const payload = req.body || {}
+  const formName = payload.form_name || payload.form_id || 'unknown form'
+  const siteUrl  = payload.site_url  || payload.site_name || ''
+
+  // Build a readable field list from human_fields (pretty names), falling back
+  // to data (raw field names), then to ordered_human_fields if present.
+  const fields =
+    payload.human_fields ||
+    (Array.isArray(payload.ordered_human_fields)
+      ? Object.fromEntries(payload.ordered_human_fields.map(f => [f.name, f.value]))
+      : null) ||
+    payload.data ||
+    {}
+
+  // Remove internal Netlify fields that aren't useful in the notification.
+  const SKIP = new Set(['ip', 'user_agent', 'referrer'])
+  const fieldLines = Object.entries(fields)
+    .filter(([k]) => !SKIP.has(k.toLowerCase()))
+    .map(([k, v]) => `**${k}:** ${String(v ?? '').slice(0, 500)}`)
+
+  const submitterIp = payload.data?.ip || '—'
+  const timestamp   = payload.created_at ? new Date(payload.created_at).toLocaleString() : new Date().toLocaleString()
+
+  const message = [
+    `📬 **New form submission — ${formName}**`,
+    siteUrl ? `🌐 ${siteUrl}` : '',
+    `🕐 ${timestamp}  ·  IP: \`${submitterIp}\``,
+    '',
+    ...fieldLines,
+  ].filter(l => l !== undefined).join('\n').slice(0, 1900)
+
+  console.log(`[netlify-webhook] form="${formName}" fields=${fieldLines.length}`)
+
+  if (NETLIFY_DISCORD_WEBHOOK) {
+    try {
+      const r = await fetch(NETLIFY_DISCORD_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: message }),
+      })
+      if (!r.ok) console.warn(`[netlify-webhook] Discord post failed: ${r.status}`)
+    } catch (e) {
+      console.warn('[netlify-webhook] Discord post error:', e.message)
+    }
+  } else {
+    console.warn('[netlify-webhook] NETLIFY_DISCORD_WEBHOOK not set — message not posted')
+  }
+
+  res.json({ ok: true })
 })
 
 app.listen(PORT, () => {
