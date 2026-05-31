@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\nirke\" -Recurse -Filter \"index.html\" -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 500000 } | Select-Object FullName, Length)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)",
+      "Bash(not exist *)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\nirke\\\\OneDrive\\\\Documents\\\\agent-memory\" -Recurse -Filter \"*.md\")",
+      "Bash(Select-Object FullName)",
+      "Bash(npm --version)"
+    ]
+  }
+}

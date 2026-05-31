@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>AI Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --g:#00ff41;--gd:#00a82b;--gk:#2d6e45;--gx:#001a00;
+  --a:#ffb000;--r:#ff2222;--bg:#000a00;--card:#020f02;
+  --f:'Press Start 2P',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{min-height:100%;background:var(--bg);color:var(--g);font-family:var(--f);font-size:10px}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#000}::-webkit-scrollbar-thumb{background:var(--gd)}
+
+/* CRT */
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.15) 2px,rgba(0,0,0,.15) 4px)}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9998;
+  background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.7) 100%)}
+
+/* Animations */
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes pulse-g{0%,100%{box-shadow:0 0 4px var(--g)}50%{box-shadow:0 0 14px var(--g),0 0 28px var(--gd)}}
+@keyframes pulse-a{0%,100%{box-shadow:0 0 4px var(--a)}50%{box-shadow:0 0 16px var(--a)}}
+@keyframes pulse-r{0%,100%{box-shadow:0 0 4px var(--r)}50%{box-shadow:0 0 16px var(--r)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slide-in{from{transform:translateX(100%)}to{transform:translateX(0)}}
+
+/* ── HOME VIEW ─────────────────────────────────────────────────── */
+#home{min-height:100vh;padding-bottom:20px}
+
+#hdr{padding:14px 14px 10px;border-bottom:2px solid var(--g);margin-bottom:12px}
+#title{font-size:12px;letter-spacing:2px}
+#cur{animation:blink 1s step-end infinite}
+#stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
+.st{font-size:6px;color:var(--gk)}.st b{color:var(--g)}
+.st.sa b{color:var(--a)}.st.sr b{color:var(--r)}
+#s-live-wrap{cursor:pointer}
+#s-live-wrap.hot b{color:var(--a);animation:livepulse 1s steps(2) infinite}
+@keyframes livepulse{50%{opacity:.4}}
+#runs-panel{display:none;margin-top:10px;border:2px solid var(--gk);background:#000814;padding:8px 10px}
+#runs-panel.show{display:block}
+#runs-panel .rp-title{font-size:6px;color:var(--gk);margin-bottom:6px}
+.rp-run{display:flex;align-items:center;gap:8px;font-size:6px;padding:3px 0;border-top:1px solid #06210f}
+.rp-run:first-of-type{border-top:none}
+.rp-run .rp-dot{width:6px;height:6px;flex-shrink:0}
+.rp-run .rp-ag{color:var(--g);min-width:120px}
+.rp-run .rp-meta{color:var(--gk)}
+.rp-run .rp-pr{color:#6fae87;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rp-src{color:var(--a)}
+
+.slabel{font-size:6px;color:var(--gk);letter-spacing:2px;padding:6px 14px 4px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;padding:0 14px}
+
+/* Agent card */
+.acard{
+  background:var(--card);border:2px solid var(--gk);padding:12px;
+  cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:7px;
+  transition:border-color .15s,box-shadow .15s;position:relative;
+}
+.acard:active{transform:scale(.97)}
+.acard.complete  {border-color:var(--g);box-shadow:0 0 8px rgba(0,255,65,.15)}
+.acard.in-progress{border-color:var(--a);box-shadow:0 0 8px rgba(255,176,0,.15)}
+.acard.blocked   {border-color:var(--r);box-shadow:0 0 8px rgba(255,34,34,.15)}
+.acard.no-data   {border-color:var(--gk);opacity:.6}
+
+.crab-wrap{animation:bob 2.5s ease-in-out infinite}
+.acard.no-data .crab-wrap{filter:grayscale(1) brightness(.4);animation:none}
+
+.aname{font-size:6px;text-align:center;word-break:break-all;color:var(--g)}
+.acard.in-progress .aname{color:var(--a)}.acard.blocked .aname{color:var(--r)}
+.acard.no-data .aname{color:var(--gk)}
+
+.aled{width:8px;height:8px;border-radius:0;flex-shrink:0}
+.aled.complete  {background:var(--g);animation:pulse-g 2s ease-in-out infinite}
+.aled.in-progress{background:var(--a);animation:pulse-a 1.4s ease-in-out infinite}
+.aled.blocked   {background:var(--r);animation:pulse-r 1s ease-in-out infinite}
+.aled.no-data   {background:var(--gk)}
+
+.abadge{font-size:5px;border:1px solid currentColor;padding:2px 4px;letter-spacing:.5px}
+.abadge.complete  {color:var(--g)}.abadge.in-progress{color:var(--a)}
+.abadge.blocked   {color:var(--r)}.abadge.no-data    {color:var(--gk)}
+
+.adate{font-size:5px;color:var(--gk)}
+
+/* ── AGENT DETAIL VIEW ─────────────────────────────────────────── */
+#agent{
+  display:none;position:fixed;inset:0;background:var(--bg);z-index:500;
+  flex-direction:column;overflow:hidden;
+}
+#agent.open{display:flex;animation:slide-in .2s ease-out}
+
+#agent-hdr{
+  padding:10px 14px;border-bottom:2px solid var(--g);flex-shrink:0;
+  display:flex;align-items:center;gap:10px;background:var(--bg);
+}
+#back-btn{
+  background:none;border:2px solid var(--gd);color:var(--gd);font-family:var(--f);
+  font-size:7px;padding:5px 8px;cursor:pointer;flex-shrink:0;
+}
+#back-btn:active{border-color:var(--g);color:var(--g)}
+#agent-crab{flex-shrink:0;animation:bob 2.5s ease-in-out infinite}
+#agent-info{flex:1;min-width:0}
+#agent-title{font-size:8px;color:var(--g);word-break:break-all}
+#agent-status{font-size:6px;color:var(--gd);margin-top:4px}
+
+/* Tabs */
+#tabs{display:flex;border-bottom:2px solid var(--gk);flex-shrink:0}
+.tab{
+  flex:1;padding:8px 4px;font-family:var(--f);font-size:6px;letter-spacing:1px;
+  background:none;border:none;color:var(--gk);cursor:pointer;border-bottom:2px solid transparent;
+  margin-bottom:-2px;
+}
+.tab.active{color:var(--g);border-bottom-color:var(--g)}
+
+/* Tab content */
+#tab-content{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+
+/* Memory tab */
+#mem-layout{display:flex;flex-direction:column;height:100%}
+#mem-files{display:flex;gap:6px;flex-wrap:wrap;padding:10px 14px 6px;flex-shrink:0;border-bottom:1px solid var(--gk)}
+.mem-chip{
+  font-family:var(--f);font-size:6px;padding:4px 7px;background:var(--card);
+  border:1px solid var(--gk);color:var(--gk);cursor:pointer;
+}
+.mem-chip.active{border-color:var(--g);color:var(--g)}
+#mem-body{flex:1;padding:12px 14px;font-size:7px;line-height:1.9;color:var(--gd);white-space:pre-wrap;word-break:break-word;overflow-y:auto}
+#mem-body .mem-h1{color:var(--g);font-size:8px}
+#mem-body .mem-h2{color:var(--g);font-size:7px;margin-top:8px}
+#mem-body .mem-flag{color:var(--a)}
+#mem-body .mem-done{color:var(--g)}
+#mem-body .mem-prog{color:var(--a)}
+#mem-body .mem-block{color:var(--r)}
+
+/* Files tab */
+#files-layout{display:flex;flex-direction:column;height:100%}
+#breadcrumb{padding:8px 14px;font-size:6px;color:var(--gk);flex-shrink:0;border-bottom:1px solid var(--gk)}
+#breadcrumb span{cursor:pointer;color:var(--gd)}#breadcrumb span:hover{color:var(--g)}
+#file-list{flex-shrink:0;border-bottom:1px solid var(--gk);max-height:45%}
+.fitem{
+  display:flex;align-items:center;gap:8px;padding:7px 14px;
+  font-size:6px;cursor:pointer;border-bottom:1px solid var(--gx);
+}
+.fitem:active{background:var(--card)}
+.fitem.dir{color:var(--a)}.fitem.file{color:var(--gd)}
+.fitem.active{background:var(--card);color:var(--g)}
+.fsize{margin-left:auto;color:var(--gk);font-size:5px}
+#file-body{flex:1;padding:12px 14px;font-size:7px;line-height:1.8;color:var(--gd);white-space:pre-wrap;word-break:break-word;overflow-y:auto}
+
+/* Run tab */
+#run-layout{display:flex;flex-direction:column;height:100%;gap:0}
+#run-output{
+  flex:1;padding:10px 14px;font-size:7px;line-height:1.8;
+  white-space:pre-wrap;word-break:break-word;overflow-y:auto;min-height:80px;
+  display:flex;flex-direction:column;gap:10px;
+}
+#run-output .err{color:var(--r)}.run-done{color:var(--gk)}
+.msg{display:flex;flex-direction:column;gap:3px}
+.msg-label{font-size:5px;letter-spacing:1px;color:var(--gk)}
+.msg.user .msg-label{color:var(--a);text-align:right}
+.msg.user .msg-body{color:var(--a);text-align:right;border-right:2px solid var(--a);padding-right:8px}
+.msg.assistant .msg-body{color:var(--g);border-left:2px solid var(--gd);padding-left:8px}
+.msg-body{white-space:pre-wrap;word-break:break-word}
+.run-hist-divider{font-size:5px;color:var(--gk);text-align:center;padding:4px 0;border-top:1px solid var(--gk);margin-top:4px}
+#run-progress{display:none;align-items:center;gap:8px;padding:6px 14px;border-top:1px solid var(--gk);flex-shrink:0}
+#run-progress.show{display:flex}
+#run-spinner{width:8px;height:8px;border:2px solid var(--gk);border-top-color:var(--g);border-radius:50%;animation:spin .6s linear infinite}
+#run-ptxt{font-size:6px;color:var(--gd)}#run-elapsed{color:var(--g)}
+#run-bar{border-top:2px solid var(--g);padding:10px 14px;flex-shrink:0;display:flex;flex-direction:column;gap:7px;background:var(--bg)}
+#run-row{display:flex;gap:6px;align-items:flex-end}
+#run-input{
+  flex:1;background:var(--card);border:2px solid var(--gk);color:var(--g);
+  font-family:var(--f);font-size:7px;padding:7px 9px;resize:none;
+  min-height:34px;max-height:90px;line-height:1.5;
+}
+#run-input::placeholder{color:var(--gk)}
+#run-input:focus{outline:none;border-color:var(--g)}
+#run-btn{
+  background:var(--g);color:#000;border:none;font-family:var(--f);
+  font-size:7px;padding:7px 10px;cursor:pointer;flex-shrink:0;height:34px;
+}
+#run-btn:disabled{background:var(--gk);color:#001a00;cursor:default}
+#stop-btn{
+  background:none;border:2px solid var(--r);color:var(--r);font-family:var(--f);
+  font-size:7px;padding:7px 8px;cursor:pointer;flex-shrink:0;height:34px;display:none;
+}
+#stop-btn.show{display:block}
+#stop-btn:active{background:rgba(255,34,34,.15)}
+#agent-refresh{
+  background:none;border:2px solid var(--gk);color:var(--gk);font-family:var(--f);
+  font-size:6px;padding:4px 7px;cursor:pointer;flex-shrink:0;margin-left:auto;
+}
+#agent-refresh:active{border-color:var(--g);color:var(--g)}
+#run-opts{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+#run-opts label{font-size:6px;color:var(--gk)}
+#run-cont{accent-color:var(--g)}
+#run-opts .opt-sep{color:var(--gk);font-size:7px}
+#run-opts select{
+  background:#000;color:var(--g);border:1px solid var(--gk);font-family:var(--f);
+  font-size:6px;padding:3px 4px;cursor:pointer;
+}
+#run-opts select:focus{outline:none;border-color:var(--g)}
+#approve-bar{
+  display:none;padding:8px 14px;border-top:2px solid var(--a);
+  background:rgba(255,176,0,.06);flex-shrink:0;
+  align-items:center;gap:10px;flex-wrap:wrap;
+}
+#approve-bar.show{display:flex}
+#approve-bar span{font-size:6px;color:var(--a);flex:1}
+#approve-btn{
+  background:var(--a);color:#000;border:none;font-family:var(--f);
+  font-size:7px;padding:6px 10px;cursor:pointer;flex-shrink:0;
+}
+#deny-btn{
+  background:none;border:2px solid var(--gk);color:var(--gk);font-family:var(--f);
+  font-size:7px;padding:6px 8px;cursor:pointer;flex-shrink:0;
+}
+
+.empty{padding:30px 14px;font-size:7px;color:var(--gk);text-align:center}
+.loading-dot::after{content:'...';animation:blink .8s step-end infinite}
+
+/* ── Search / filter ───────────────────────────────────────────── */
+#search-wrap{padding:0 14px 4px;display:flex;gap:6px}
+#search{
+  flex:1;background:var(--card);border:2px solid var(--gk);color:var(--g);
+  font-family:var(--f);font-size:7px;padding:7px 9px;letter-spacing:1px;
+}
+#search::placeholder{color:var(--gk)}
+#search:focus{outline:none;border-color:var(--g)}
+#new-agent-btn{
+  background:none;border:2px solid var(--gk);color:var(--g);font-family:var(--f);
+  font-size:7px;padding:0 12px;cursor:pointer;flex-shrink:0;white-space:nowrap;
+}
+#new-agent-btn:hover{border-color:var(--g)}
+
+/* Flag indicator on agent cards */
+.aflag{position:absolute;top:5px;right:6px;font-size:8px;animation:blink 1.2s step-end infinite}
+
+/* Context copy button (agent header) */
+#copy-btn{
+  background:none;border:2px solid var(--gk);color:var(--gk);font-family:var(--f);
+  font-size:7px;padding:4px 7px;cursor:pointer;flex-shrink:0;
+}
+#copy-btn:active{border-color:var(--g);color:var(--g)}
+#copy-btn.ok{border-color:var(--g);color:var(--g)}
+
+/* Toast */
+#toast{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:10000;
+  background:var(--card);border:2px solid var(--g);color:var(--g);
+  font-family:var(--f);font-size:7px;padding:8px 12px;letter-spacing:1px;
+  opacity:0;transition:opacity .2s;pointer-events:none;box-shadow:0 0 12px rgba(0,255,65,.3);
+}
+#toast.show{opacity:1}
+#toast.err{border-color:var(--r);color:var(--r);box-shadow:0 0 12px rgba(255,34,34,.3)}
+</style>
+</head>
+<body>
+
+<!-- ══ HOME VIEW ═════════════════════════════════════════════ -->
+<div id="home">
+  <div id="hdr">
+    <div id="title">██ AI COMMAND CENTER <span id="cur">█</span></div>
+    <div id="stats">
+      <div class="st">AGENTS: <b id="s-t">—</b></div>
+      <div class="st">DONE: <b id="s-d">—</b></div>
+      <div class="st sa">RUNNING: <b id="s-r">—</b></div>
+      <div class="st sr">BLOCKED: <b id="s-b">—</b></div>
+      <div class="st">SYNC: <b id="s-s">—</b></div>
+      <div class="st sa" id="s-live-wrap" onclick="toggleRunsPanel()" title="Live agent runs — click for detail">⚡ ACTIVE: <b id="s-live">0</b></div>
+      <div class="st" id="s-cost-wrap" title="Total cost of runs started today">TODAY: <b id="s-cost">$0.00</b></div>
+    </div>
+  </div>
+  <div id="runs-panel"></div>
+  <div class="slabel">▶ SELECT AGENT</div>
+  <div id="search-wrap"><input id="search" placeholder="FILTER AGENTS — PRESS / TO SEARCH" oninput="renderGrid()" autocomplete="off"/><button id="new-agent-btn" onclick="newAgent()" title="Scaffold a new agent">＋ NEW</button></div>
+  <div id="grid"><div class="empty loading-dot">LOADING</div></div>
+</div>
+<div id="toast"></div>
+
+<!-- ══ AGENT DETAIL VIEW ════════════════════════════════════ -->
+<div id="agent">
+  <div id="agent-hdr">
+    <button id="back-btn" onclick="goHome()">◀ BACK</button>
+    <div id="agent-crab"></div>
+    <div id="agent-info">
+      <div id="agent-title">—</div>
+      <div id="agent-status">—</div>
+    </div>
+    <div class="aled no-data" id="agent-led"></div>
+    <button id="copy-btn" onclick="copyView()" title="Copy current view">⧉</button>
+    <button id="agent-refresh" onclick="refreshAgent()" title="Reload memory">↺</button>
+  </div>
+  <div id="tabs">
+    <button class="tab active" onclick="switchTab('memory')">MEMORY</button>
+    <button class="tab" onclick="switchTab('files')">FILES</button>
+    <button class="tab" onclick="switchTab('run')">RUN</button>
+  </div>
+  <div id="tab-content">
+    <!-- Memory tab -->
+    <div id="tab-memory" style="display:flex;flex-direction:column;height:100%">
+      <div id="mem-files"></div>
+      <div id="mem-body"><span class="empty loading-dot">LOADING</span></div>
+    </div>
+    <!-- Files tab -->
+    <div id="tab-files" style="display:none;flex-direction:column;height:100%">
+      <div id="breadcrumb"></div>
+      <div id="file-list" style="overflow-y:auto"></div>
+      <div id="file-body"><span class="empty">SELECT A FILE</span></div>
+    </div>
+    <!-- Run tab -->
+    <div id="tab-run" style="display:none;flex-direction:column;height:100%">
+      <div id="run-output"></div>
+      <div id="run-progress"><div id="run-spinner"></div><span id="run-ptxt">PROCESSING — <span id="run-elapsed">0</span>s</span></div>
+      <div id="approve-bar">
+        <span>⚠ CLAUDE IS ASKING FOR APPROVAL BEFORE ACTING</span>
+        <button id="deny-btn" onclick="replyToRun('No, do not make any changes.')">✕ DENY</button>
+        <button id="approve-btn" onclick="replyToRun('Yes, approved. Please go ahead and make all the changes.')">✓ APPROVE</button>
+      </div>
+      <div id="run-bar">
+        <div id="run-row">
+          <textarea id="run-input" rows="1" placeholder="ENTER PROMPT..." oninput="growRun(this)" onkeydown="runKey(event)"></textarea>
+          <button id="stop-btn" onclick="stopRun()">■ STOP</button>
+          <button id="run-btn" onclick="runPrompt()">RUN ▶</button>
+        </div>
+        <div id="run-opts">
+          <input type="checkbox" id="run-cont" checked/>
+          <label for="run-cont">--CONTINUE (resume last session)</label>
+          <span class="opt-sep">·</span>
+          <label for="run-model">MODEL</label>
+          <select id="run-model">
+            <option value="">default</option>
+            <option value="opus">opus</option>
+            <option value="sonnet">sonnet</option>
+            <option value="haiku">haiku</option>
+          </select>
+          <label for="run-effort">EFFORT</label>
+          <select id="run-effort">
+            <option value="">default</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Crab SVGs ─────────────────────────────────────────────────────────────────
+const COLORS = {
+  'jarvis':'#00ff41','aid-helpdesk':'#44aaff','eshis-curriculum':'#ff6688',
+  'club-window-services':'#ff8822','command-center':'#cc44ff','kanadojo':'#ffdd22',
+  'making-moves-express':'#00ddff','hoagies':'#ff5533','sbl-rankings':'#55ff88',
+  'lachys-web-dev':'#ff88dd','fun-raising':'#88ff44','lachys-gardening':'#44ffbb',
+  'ggl-maintenance':'#ffbb44','llewellyn-property':'#4466ff','vp-elite':'#ff44bb',
+  'sandwich-house':'#ffcc44',
+}
+function agentColor(name) {
+  if (COLORS[name]) return COLORS[name]
+  let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) & 0xffffffff
+  return `hsl(${Math.abs(h)%360},100%,60%)`
+}
+function crabSVG(color, size=48) {
+  const w=size, h=Math.round(size*10/16)
+  // 16×10 grid
+  return `<svg width="${w}" height="${h}" viewBox="0 0 16 10" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+    <!-- body: 12 wide × 7 tall — long torso fills most of the sprite -->
+    <rect x="2" y="0" width="12" height="7" fill="${color}"/>
+    <!-- arms: 2×2 squares flush to each side -->
+    <rect x="0" y="3" width="2" height="2" fill="${color}"/>
+    <rect x="14" y="3" width="2" height="2" fill="${color}"/>
+    <!-- 4 short straight legs, 2px wide × 3px tall -->
+    <rect x="3" y="7" width="2" height="3" fill="${color}"/>
+    <rect x="6" y="7" width="2" height="3" fill="${color}"/>
+    <rect x="9" y="7" width="2" height="3" fill="${color}"/>
+    <rect x="12" y="7" width="2" height="3" fill="${color}"/>
+    <!-- eyes on the torso -->
+    <rect x="6" y="1" width="1" height="2" fill="#000" opacity=".9"/>
+    <rect x="9" y="1" width="1" height="2" fill="#000" opacity=".9"/>
+    <rect x="6" y="1" width="1" height="1" fill="white" opacity=".35"/>
+    <rect x="9" y="1" width="1" height="1" fill="white" opacity=".35"/>
+  </svg>`
+}
+
+// ── Parsers ───────────────────────────────────────────────────────────────────
+function parseStatus(c){
+  if(!c) return'no-data'
+  const m=c.match(/##\s*Status\s*\n+([^\n#]+)/i); if(!m) return'no-data'
+  const r=m[1].trim().toLowerCase()
+  if(r.includes('complete')) return'complete'
+  if(r.includes('in progress')) return'in-progress'
+  if(r.includes('blocked')) return'blocked'
+  return'no-data'
+}
+const SLABEL={complete:'COMPLETE','in-progress':'IN PROGRESS',blocked:'BLOCKED','no-data':'NO DATA'}
+function parseLastEntry(c){
+  if(!c) return''
+  const m=c.match(/##\s*What I did\s*\n+([\s\S]*?)(?=\n##|\n---|$)/i); if(!m) return''
+  const ls=m[1].split('\n').map(l=>l.replace(/^[-*]\s*/,'')).filter(l=>l.trim())
+  return ls[ls.length-1]||''
+}
+function parseFlags(c){
+  if(!c) return[]
+  const m=c.match(/##\s*Flags for Lachy[^\n]*\n+([\s\S]*?)(?=\n##|\n---|$)/i); if(!m) return[]
+  return m[1].split('\n').map(l=>l.replace(/^[-*]\s*/,'')).filter(l=>l.trim()&&l.toLowerCase()!=='none')
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function escAttr(s){return esc(s).replace(/"/g,'&quot;')}
+function fmtSize(b){if(!b)return'';if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'KB';return(b/1048576).toFixed(1)+'MB'}
+
+// Render memory markdown with color highlights
+function renderMd(txt){
+  return txt
+    .split('\n')
+    .map(l=>{
+      const e=esc(l)
+      if(l.startsWith('# ')) return`<span class="mem-h1">${e}</span>`
+      if(l.startsWith('## ')) return`<span class="mem-h2">${e}</span>`
+      if(/🚩/.test(l)) return`<span class="mem-flag">${e}</span>`
+      if(/complete/i.test(l)&&l.startsWith('##')||/^complete/i.test(l.replace(/[*_]/g,''))) return`<span class="mem-done">${e}</span>`
+      if(/in progress/i.test(l)) return`<span class="mem-prog">${e}</span>`
+      if(/blocked/i.test(l)) return`<span class="mem-block">${e}</span>`
+      return e
+    })
+    .join('\n')
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let agentData={}, currentAgent=null, currentTab='memory'
+let elapsedTimer=null
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+// Server is open by default; if ACC_SECRET is set it returns 401 and we prompt
+// once for a token, then persist it in localStorage for future requests.
+const TOKEN_KEY='acc_token'
+let authToken=localStorage.getItem(TOKEN_KEY)||''
+function authHeaders(extra){const h=extra||{};return authToken?{...h,Authorization:'Bearer '+authToken}:h}
+function setToken(t){authToken=(t||'').trim();authToken?localStorage.setItem(TOKEN_KEY,authToken):localStorage.removeItem(TOKEN_KEY)}
+function promptToken(){
+  const t=prompt('This server requires an access token (ACC_SECRET):',authToken)
+  if(t==null) return false
+  setToken(t); return !!authToken
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let toastTimer=null
+function toast(msg,isErr){
+  const el=document.getElementById('toast')
+  el.textContent=msg; el.className='show'+(isErr?' err':'')
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.className='',1800)
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+const api = async p => {
+  try{
+    let r=await fetch(p,{headers:authHeaders()})
+    if(r.status===401&&promptToken()) r=await fetch(p,{headers:authHeaders()})
+    return r.ok?r.json():null
+  }catch{return null}
+}
+
+// ── Home view ─────────────────────────────────────────────────────────────────
+let homeOrder=[]
+async function refresh(){
+  try{
+    const agents=await api('/agents')
+    if(!agents) throw new Error('cannot reach server')
+    const logs=await Promise.all(agents.map(a=>api(`/logs/${a}`)))
+    agentData={}; agents.forEach((a,i)=>agentData[a]=logs[i])
+    const ORDER=['blocked','in-progress','complete','no-data']
+    agents.sort((a,b)=>ORDER.indexOf(parseStatus(agentData[a]?.content))-ORDER.indexOf(parseStatus(agentData[b]?.content)))
+    homeOrder=agents
+    const ss=agents.map(a=>parseStatus(agentData[a]?.content))
+    document.getElementById('s-t').textContent=agents.length
+    document.getElementById('s-d').textContent=ss.filter(s=>s==='complete').length
+    document.getElementById('s-r').textContent=ss.filter(s=>s==='in-progress').length
+    document.getElementById('s-b').textContent=ss.filter(s=>s==='blocked').length
+    document.getElementById('s-s').textContent=new Date().toLocaleTimeString()
+    renderGrid()
+  }catch(e){
+    document.getElementById('grid').innerHTML=`<div class="empty">⚠ OFFLINE<br><br>${esc(e.message)}<br><br>Is <b>node server.js</b> running?</div>`
+  }
+}
+
+function renderGrid(){
+  const q=(document.getElementById('search').value||'').trim().toLowerCase()
+  const list=q?homeOrder.filter(a=>a.toLowerCase().includes(q)):homeOrder
+  const grid=document.getElementById('grid')
+  if(!homeOrder.length){grid.innerHTML='<div class="empty loading-dot">LOADING</div>';return}
+  if(!list.length){grid.innerHTML=`<div class="empty">NO AGENTS MATCH "${esc(q)}"</div>`;return}
+  grid.innerHTML=list.map(a=>{
+    const d=agentData[a]; const st=parseStatus(d?.content)
+    const color=agentColor(a)
+    const date=d?.file?d.file.replace('.md',''):''
+    const flags=parseFlags(d?.content)
+    return`<div class="acard ${st}" onclick="openAgent('${esc(a)}')">
+      ${flags.length?`<span class="aflag" title="${escAttr(flags.length+' flag(s) for Lachy')}">🚩</span>`:''}
+      <div class="crab-wrap">${crabSVG(color,44)}</div>
+      <div class="aname">${esc(a)}</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div class="aled ${st}"></div>
+        <span class="abadge ${st}">${SLABEL[st]}</span>
+      </div>
+      ${date?`<div class="adate">${date}</div>`:''}
+    </div>`
+  }).join('')
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function openAgent(name){
+  currentAgent=name
+  const d=agentData[name]
+  const st=parseStatus(d?.content)
+  const color=agentColor(name)
+  document.getElementById('agent-title').textContent=name.toUpperCase()
+  document.getElementById('agent-status').textContent=SLABEL[st]
+  document.getElementById('agent-status').style.color=st==='complete'?'var(--g)':st==='in-progress'?'var(--a)':st==='blocked'?'var(--r)':'var(--gk)'
+  document.getElementById('agent-crab').innerHTML=crabSVG(color,36)
+  const led=document.getElementById('agent-led')
+  led.className='aled '+st
+  document.getElementById('agent').classList.add('open')
+  document.getElementById('home').style.visibility='hidden'
+  switchTab('memory')
+  loadMemory()
+}
+
+function goHome(){
+  document.getElementById('agent').classList.remove('open')
+  document.getElementById('home').style.visibility='visible'
+  currentAgent=null
+  stopRun()
+}
+
+function refreshAgent(){
+  if(!currentAgent) return
+  if(currentTab==='memory') loadMemory()
+  else if(currentTab==='files') loadFiles(filePath,'')
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(name){
+  currentTab=name
+  document.querySelectorAll('.tab').forEach((t,i)=>{
+    const n=['memory','files','run'][i]
+    t.classList.toggle('active',n===name)
+  })
+  document.getElementById('tab-memory').style.display=name==='memory'?'flex':'none'
+  document.getElementById('tab-files').style.display=name==='files'?'flex':'none'
+  document.getElementById('tab-run').style.display=name==='run'?'flex':'none'
+  if(name==='files'&&currentAgent) loadFiles('','')
+  if(name==='run'){ loadHistory(); document.getElementById('run-input').focus() }
+}
+
+// ── Memory tab ────────────────────────────────────────────────────────────────
+async function loadMemory(){
+  if(!currentAgent) return
+  const [allLogs, claudeMd] = await Promise.all([
+    api(`/logs/${currentAgent}/all`),
+    api(`/file/${currentAgent}?p=CLAUDE.md`),
+  ])
+  const logs=allLogs||[]
+  const chips=document.getElementById('mem-files')
+  const items=[]
+  if(claudeMd?.content) items.push({id:'CLAUDE.md',label:'CLAUDE.md'})
+  logs.forEach(f=>items.push({id:f,label:f.replace('.md','')}))
+  chips.innerHTML=items.map(it=>
+    `<div class="mem-chip" data-id="${esc(it.id)}" onclick="loadMemFile('${esc(it.id)}')">${esc(it.label)}</div>`
+  ).join('')
+  // Load most recent by default
+  if(logs.length) loadMemFile(logs[0])
+  else if(claudeMd?.content){
+    document.getElementById('mem-body').innerHTML=renderMd(claudeMd.content)
+    chips.querySelector('[data-id="CLAUDE.md"]')?.classList.add('active')
+  } else {
+    document.getElementById('mem-body').innerHTML='<span class="empty">NO MEMORY FILES FOUND</span>'
+  }
+}
+
+async function loadMemFile(fileId){
+  document.querySelectorAll('.mem-chip').forEach(c=>c.classList.toggle('active',c.dataset.id===fileId))
+  document.getElementById('mem-body').innerHTML='<span class="loading-dot">LOADING</span>'
+  let data
+  if(fileId==='CLAUDE.md'){
+    data=await api(`/file/${currentAgent}?p=CLAUDE.md`)
+  } else {
+    data=await api(`/memory/${currentAgent}/${fileId}`)
+  }
+  document.getElementById('mem-body').innerHTML=data?.content
+    ?renderMd(data.content)
+    :'<span class="empty">FILE NOT FOUND</span>'
+}
+
+// ── Files tab ─────────────────────────────────────────────────────────────────
+let filePath=''
+
+async function loadFiles(dir, clickedFile){
+  if(!currentAgent) return
+  filePath=dir
+  const data=await api(`/files/${currentAgent}${dir?'?dir='+encodeURIComponent(dir):''}`)
+  if(!data){
+    document.getElementById('breadcrumb').innerHTML='<span style="color:var(--r)">⚠ DIR NOT FOUND</span>'
+    document.getElementById('file-list').innerHTML=`<div class="empty" style="color:var(--gk)">No project directory configured for this agent.<br><br>Add it to AGENT_DIRS in server.js</div>`
+    return
+  }
+  // Breadcrumb
+  const parts=dir?dir.split('/'):[]
+  let bc=`<span data-dir="">ROOT</span>`
+  let acc=''
+  parts.forEach(p=>{acc+=(acc?'/':'')+p;const a=acc;bc+=` › <span data-dir="${escAttr(a)}">${esc(p)}</span>`})
+  document.getElementById('breadcrumb').innerHTML=bc
+  // File list
+  document.getElementById('file-list').innerHTML=data.items.map(it=>{
+    const icon=it.dir?'📁':'📄'
+    const fpath=dir?(dir+'/'+it.name):it.name
+    const cl=it.dir?'fitem dir':'fitem file'
+    return`<div class="${cl}" data-fpath="${escAttr(fpath)}"${it.dir?' data-isdir="1"':''}>
+      <span>${icon} ${esc(it.name)}</span>
+      <span class="fsize">${it.dir?'DIR':fmtSize(it.size)}</span>
+    </div>`
+  }).join('')||'<div class="empty">EMPTY DIRECTORY</div>'
+  // Clear file view if navigating dirs
+  if(!clickedFile) document.getElementById('file-body').innerHTML='<span class="empty">SELECT A FILE</span>'
+}
+
+async function readFile(p){
+  document.querySelectorAll('.fitem').forEach(el=>el.classList.toggle('active',el.dataset.fpath===p))
+  document.getElementById('file-body').innerHTML='<span class="loading-dot">LOADING</span>'
+  const data=await api(`/file/${currentAgent}?p=${encodeURIComponent(p)}`)
+  document.getElementById('file-body').innerHTML=data?.content!=null
+    ?esc(data.content)
+    :'<span class="empty">CANNOT READ FILE (binary or missing)</span>'
+}
+
+// ── Run tab ───────────────────────────────────────────────────────────────────
+let runController = null
+let historyLoaded = false
+
+function growRun(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,90)+'px'}
+function runKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();runPrompt()}}
+function stopRun(){if(runController){runController.abort();runController=null}}
+
+const APPROVAL_PATTERNS = [
+  /please approve/i, /approval/i, /flagged/i,
+  /waiting for (your|feedback|confirmation|input)/i,
+  /do you want me to/i, /would you like me to/i, /shall i/i,
+  /should i proceed/i, /permission to/i, /before i (make|write|edit|delete|remove|create)/i,
+]
+function needsApproval(text) {
+  return APPROVAL_PATTERNS.some(p => p.test(text))
+}
+
+async function replyToRun(replyText) {
+  document.getElementById('approve-bar').classList.remove('show')
+  if (!currentAgent) return
+  const cont = document.getElementById('run-cont').checked
+  const out   = document.getElementById('run-output')
+  const prog  = document.getElementById('run-progress')
+  const btn   = document.getElementById('run-btn')
+  const stop  = document.getElementById('stop-btn')
+  btn.disabled = true; btn.textContent = '...'
+  stop.classList.add('show')
+  out.appendChild(msgEl('user', replyText))
+  const assistantMsg  = msgEl('assistant', '')
+  const assistantBody = assistantMsg.querySelector('.msg-body')
+  out.appendChild(assistantMsg)
+  out.scrollTop = out.scrollHeight
+  prog.classList.add('show')
+  let secs = 0; document.getElementById('run-elapsed').textContent = '0'
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { secs++; document.getElementById('run-elapsed').textContent = secs }, 1000)
+  runController = new AbortController()
+  let fullText = ''
+  try {
+    const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ agent: currentAgent, prompt: replyText, continueSession: true }),
+      signal: runController.signal })
+    if (!res.ok) { appendRun(`ERR: ${res.status}`, 'err'); return }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n'); buf = lines.pop()
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const e = JSON.parse(line.slice(6))
+          if (e.text) { fullText += e.text; assistantBody.textContent += e.text; out.scrollTop = out.scrollHeight }
+          if (e.error) appendRun(e.error, 'err')
+          if (e.done) { const d = document.createElement('span'); d.className = 'run-done'; d.textContent = `\n── done (exit ${e.code}) ──`; assistantBody.appendChild(d) }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') appendRun('\n── stopped ──', 'run-done')
+    else appendRun(`CONNECTION ERROR: ${e.message}`, 'err')
+  } finally {
+    runController = null
+    clearInterval(elapsedTimer); prog.classList.remove('show')
+    stop.classList.remove('show'); btn.disabled = false; btn.textContent = 'RUN ▶'
+    if (needsApproval(fullText)) document.getElementById('approve-bar').classList.add('show')
+    setTimeout(refresh, 4000)
+  }
+}
+
+function msgEl(role, text) {
+  const wrap = document.createElement('div')
+  wrap.className = 'msg ' + role
+  const label = document.createElement('div')
+  label.className = 'msg-label'
+  label.textContent = role === 'user' ? 'YOU' : 'CLAUDE'
+  const body = document.createElement('div')
+  body.className = 'msg-body'
+  body.textContent = text
+  wrap.appendChild(label)
+  wrap.appendChild(body)
+  return wrap
+}
+
+async function loadHistory() {
+  if (!currentAgent) return
+  historyLoaded = false
+  const out = document.getElementById('run-output')
+  out.innerHTML = '<span style="color:var(--gk);font-size:6px">LOADING HISTORY<span class="loading-dot"></span></span>'
+  const data = await api(`/history/${currentAgent}`)
+  out.innerHTML = ''
+  if (!data?.messages?.length) {
+    out.innerHTML = '<span style="color:var(--gk);font-size:6px">NO SAVED CONVERSATION YET<br><br>First prompt will start a fresh Claude Code session in this agent\'s project directory. Memory log will be injected as context.<br><br>Use --CONTINUE to chain sessions.</span>'
+    historyLoaded = true
+    return
+  }
+  data.messages.forEach(m => out.appendChild(msgEl(m.role, m.text)))
+  const div = document.createElement('div')
+  div.className = 'run-hist-divider'
+  div.textContent = '── ' + data.messages.length + ' messages loaded · new messages below ──'
+  out.appendChild(div)
+  out.scrollTop = out.scrollHeight
+  historyLoaded = true
+}
+
+async function runPrompt(){
+  if(!currentAgent) return
+  const prompt=document.getElementById('run-input').value.trim(); if(!prompt) return
+  const cont=document.getElementById('run-cont').checked
+  const model=document.getElementById('run-model').value
+  const effort=document.getElementById('run-effort').value
+  const btn=document.getElementById('run-btn')
+  const stop=document.getElementById('stop-btn')
+  const out=document.getElementById('run-output')
+  const prog=document.getElementById('run-progress')
+  document.getElementById('approve-bar').classList.remove('show')
+  btn.disabled=true; btn.textContent='...'
+  stop.classList.add('show')
+  // Append user message as chat bubble
+  out.appendChild(msgEl('user', prompt))
+  // Create assistant bubble that we'll stream into
+  const assistantMsg = msgEl('assistant', '')
+  const assistantBody = assistantMsg.querySelector('.msg-body')
+  out.appendChild(assistantMsg)
+  out.scrollTop = out.scrollHeight
+  prog.classList.add('show')
+  let secs=0; document.getElementById('run-elapsed').textContent='0'
+  clearInterval(elapsedTimer)
+  elapsedTimer=setInterval(()=>{secs++;document.getElementById('run-elapsed').textContent=secs},1000)
+  runController=new AbortController()
+  let fullText=''
+  try{
+    const res=await fetch('/run',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({agent:currentAgent,prompt,continueSession:cont,model,effort}),
+      signal:runController.signal})
+    if(res.status===401){appendRun('UNAUTHORIZED — token required',
+      'err');promptToken();return}
+    if(!res.ok){appendRun(`ERR: ${res.status}`,'err');return}
+    const reader=res.body.getReader(); const dec=new TextDecoder(); let buf=''
+    while(true){
+      const{done,value}=await reader.read(); if(done) break
+      buf+=dec.decode(value,{stream:true})
+      const lines=buf.split('\n');buf=lines.pop()
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue
+        try{
+          const e=JSON.parse(line.slice(6))
+          if(e.text){ fullText+=e.text; assistantBody.textContent+=e.text; out.scrollTop=out.scrollHeight }
+          if(e.error) appendRun(e.error,'err')
+          if(e.done){
+            const bits=[`exit ${e.code}`]
+            if(typeof e.cost==='number'&&e.cost>0) bits.push(`$${e.cost.toFixed(4)}`)
+            if(e.durationMs) bits.push(`${(e.durationMs/1000).toFixed(1)}s`)
+            if(e.numTurns) bits.push(`${e.numTurns} turn${e.numTurns>1?'s':''}`)
+            const d=document.createElement('span');d.className='run-done';d.textContent=`\n── done · ${bits.join(' · ')} ──`;assistantBody.appendChild(d)
+          }
+        }catch{}
+      }
+    }
+  }catch(e){
+    if(e.name==='AbortError') appendRun('\n── stopped by user ──','run-done')
+    else appendRun(`CONNECTION ERROR: ${e.message}`,'err')
+  }
+  finally{
+    runController=null
+    clearInterval(elapsedTimer); prog.classList.remove('show')
+    stop.classList.remove('show')
+    btn.disabled=false; btn.textContent='RUN ▶'
+    const inp=document.getElementById('run-input'); inp.value=''; growRun(inp)
+    if(needsApproval(fullText)) document.getElementById('approve-bar').classList.add('show')
+    setTimeout(refresh,4000)
+  }
+}
+
+function appendRun(text,cls){
+  const out=document.getElementById('run-output')
+  const s=document.createElement('span')
+  if(cls) s.className=cls
+  s.textContent=text
+  out.appendChild(s)
+  out.scrollTop=out.scrollHeight
+}
+
+// ── Copy current view ───────────────────────────────────────────────────────
+async function copyView(){
+  const id=currentTab==='files'?'file-body':currentTab==='run'?'run-output':'mem-body'
+  const txt=document.getElementById(id)?.textContent||''
+  if(!txt.trim()){toast('NOTHING TO COPY',true);return}
+  try{
+    await navigator.clipboard.writeText(txt)
+    const btn=document.getElementById('copy-btn');btn.classList.add('ok')
+    setTimeout(()=>btn.classList.remove('ok'),900)
+    toast('COPIED ✓')
+  }catch{toast('COPY FAILED',true)}
+}
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  const agentOpen=document.getElementById('agent').classList.contains('open')
+  const tag=(e.target.tagName||'').toLowerCase()
+  const typing=tag==='input'||tag==='textarea'
+  if(e.key==='Escape'){
+    if(typing&&e.target.id==='search'){e.target.value='';renderGrid();e.target.blur();return}
+    if(agentOpen) goHome()
+  }
+  if(e.key==='/'&&!typing&&!agentOpen){e.preventDefault();document.getElementById('search').focus()}
+})
+
+// ── Persist run preferences (--continue, model, effort) ──────────────────────
+;(()=>{
+  const cb=document.getElementById('run-cont')
+  const stored=localStorage.getItem('acc_continue')
+  cb.checked = stored===null ? true : stored==='1'   // default on
+  cb.addEventListener('change',()=>localStorage.setItem('acc_continue',cb.checked?'1':'0'))
+
+  const md=document.getElementById('run-model')
+  const ef=document.getElementById('run-effort')
+  md.value=localStorage.getItem('acc_model')||''
+  ef.value=localStorage.getItem('acc_effort')||''
+  md.addEventListener('change',()=>localStorage.setItem('acc_model',md.value))
+  ef.addEventListener('change',()=>localStorage.setItem('acc_effort',ef.value))
+})()
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+// Delegated click handler for file list (avoids inline JS with special chars in paths)
+document.getElementById('file-list').addEventListener('click', e => {
+  const item = e.target.closest('.fitem')
+  if (!item) return
+  const p = item.dataset.fpath
+  if (p === undefined) return
+  if (item.dataset.isdir === '1') loadFiles(p, '')
+  else readFile(p)
+})
+
+// Delegated breadcrumb handler
+document.getElementById('breadcrumb').addEventListener('click', e => {
+  const span = e.target.closest('span[data-dir]')
+  if (!span) return
+  loadFiles(span.dataset.dir, '')
+})
+
+refresh()
+setInterval(refresh,60000)
+
+// ── Live runs poller (registry: active count, cost, swarm visibility) ─────────
+let runsPanelOpen=false
+function toggleRunsPanel(){
+  runsPanelOpen=!runsPanelOpen
+  document.getElementById('runs-panel').classList.toggle('show',runsPanelOpen)
+  pollRuns()
+}
+function srcTag(s){return s==='swarm'?'🐝 swarm':s==='agent'?'🔗 agent':'🖥 you'}
+function fmtAgo(ms){const s=Math.round((Date.now()-ms)/1000);return s<60?s+'s':Math.round(s/60)+'m'}
+async function pollRuns(){
+  let data
+  try{ const r=await fetch('/runs',{headers:authHeaders()}); if(!r.ok) return; data=await r.json() }
+  catch{ return }
+  const n=data.counts.active
+  document.getElementById('s-live').textContent=n
+  document.getElementById('s-live-wrap').classList.toggle('hot',n>0)
+  document.getElementById('s-cost').textContent='$'+(data.counts.costToday||0).toFixed(2)
+  if(!runsPanelOpen) return
+  const panel=document.getElementById('runs-panel')
+  const rows=[...data.active,...data.recent].slice(0,18)
+  if(!rows.length){ panel.innerHTML='<div class="rp-title">NO RUNS YET</div>'; return }
+  const dot=st=>st==='running'?'var(--a)':st==='waiting'?'var(--a)':st==='error'?'var(--r)':'var(--g)'
+  panel.innerHTML='<div class="rp-title">RUN REGISTRY — '+data.counts.active+' active · $'+(data.counts.costToday||0).toFixed(3)+' today</div>'+
+    rows.map(r=>{
+      const meta=[r.model&&'🧠'+r.model,r.effort&&'⚡'+r.effort,r.cost>0&&'$'+r.cost.toFixed(3),
+        r.status==='running'?fmtAgo(r.startedAt):(r.durationMs?(r.durationMs/1000).toFixed(1)+'s':'')].filter(Boolean).join(' ')
+      return '<div class="rp-run"><span class="rp-dot" style="background:'+dot(r.status)+'"></span>'+
+        '<span class="rp-ag">'+esc(r.agent)+' <span class="rp-src">'+srcTag(r.source)+'</span></span>'+
+        '<span class="rp-pr">'+esc(r.prompt||'')+'</span>'+
+        '<span class="rp-meta">'+esc(meta)+'</span></div>'
+    }).join('')
+}
+pollRuns()
+setInterval(pollRuns,4000)
+
+// ── Scaffold a new agent (#3) ─────────────────────────────────────────────────
+async function newAgent(){
+  const name=prompt('New agent name (e.g. corner-cafe):')
+  if(!name||!name.trim()) return
+  const dir=prompt('Project directory (blank = default web-dev clients folder):','')
+  try{
+    const r=await fetch('/new-agent',{method:'POST',headers:authHeaders({'Content-Type':'application/json'}),
+      body:JSON.stringify({name:name.trim(),dir:dir&&dir.trim()?dir.trim():undefined})})
+    const d=await r.json()
+    if(!r.ok){ toast('✗ '+(d.error||r.status),true); return }
+    toast('✓ CREATED '+d.agent)
+    await refresh()
+    document.getElementById('search').value=d.agent; renderGrid()
+  }catch(e){ toast('✗ '+e.message,true) }
+}
+</script>
+</body>
+</html>

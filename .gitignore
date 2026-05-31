@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Secrets & local config
+.env
+config.json
+
+# Logs & scratch output
+*.log
+*.err
+._check.js
+._chk.js
+
+# Runtime state (Discord status board + activity feed + run mirror + scheduler)
+board.json
+activity.json
+mirror.json
+schedule.json
+discord-ops.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Legacy Vite scaffolding output (kept out of releases)
+dist/

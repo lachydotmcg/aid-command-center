@@ -1,0 +1,98 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --green: #00ff41;
+  --green-dim: #00a82b;
+  --green-dark: #003b0f;
+  --amber: #ffb000;
+  --red: #ff2222;
+  --bg: #000a00;
+  --bg-card: #020f02;
+  --border: #00ff41;
+  --font: 'Press Start 2P', monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--green);
+  font-family: var(--font);
+  font-size: 10px;
+}
+
+/* CRT scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.15) 2px,
+    rgba(0, 0, 0, 0.15) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* CRT vignette */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%);
+  pointer-events: none;
+  z-index: 9998;
+}
+
+/* Pixel border mixin via box-shadow */
+.pixel-border {
+  border: 2px solid var(--green);
+  box-shadow: 0 0 8px var(--green-dim), inset 0 0 8px rgba(0,255,65,0.05);
+}
+
+.pixel-border-amber {
+  border: 2px solid var(--amber);
+  box-shadow: 0 0 8px rgba(255,176,0,0.4), inset 0 0 8px rgba(255,176,0,0.05);
+}
+
+.pixel-border-red {
+  border: 2px solid var(--red);
+  box-shadow: 0 0 8px rgba(255,34,34,0.5), inset 0 0 8px rgba(255,34,34,0.05);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #000; }
+::-webkit-scrollbar-thumb { background: var(--green-dim); }
+
+/* Blink animation */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 4px var(--green); }
+  50% { box-shadow: 0 0 12px var(--green), 0 0 24px var(--green-dim); }
+}
+
+@keyframes pulse-amber {
+  0%, 100% { box-shadow: 0 0 4px var(--amber); }
+  50% { box-shadow: 0 0 12px var(--amber), 0 0 24px rgba(255,176,0,0.4); }
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 4px var(--red); }
+  50% { box-shadow: 0 0 12px var(--red), 0 0 24px rgba(255,34,34,0.4); }
+}
+
+@keyframes scan {
+  0% { top: -100%; }
+  100% { top: 100%; }
+}

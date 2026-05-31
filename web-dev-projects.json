@@ -1,0 +1,6 @@
+{
+  "projects": [
+    { "slug": "club-window-services", "label": "Club Window Services" },
+    { "slug": "making-moves-express", "label": "Making Moves Express" }
+  ]
+}
