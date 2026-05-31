@@ -93,6 +93,9 @@ The bot is the primary interface. Run these from any channel, or from an agent's
 | `!mirror` | Mirror delegated run output into each agent's own channel. |
 | `!new-agent <name> [dir]` | Scaffold a new agent (project dir + `CLAUDE.md` + memory folder). |
 | `!archive <agent>` | Move an agent's channel to the 🗄 Archive category (`undo` to restore). |
+| `!money` | Create the `#money` channel for Jarvis's monthly revenue/goals updates. |
+| `!leads` | Create `#leads` + show the form-webhook URL to wire into your sites. |
+| `!goals` | Show business goals · `!goal add <text>` to append one. |
 | `!model [agent] opus high` | Set a per-agent default model/effort for subsequent `!run` calls. |
 | `!gif <name\|list>` | Post a reaction GIF (thinking, coding, done, error, money…). |
 | `!status` | Check the server is reachable. |
@@ -180,8 +183,8 @@ Override any setting via **environment variables** or an optional **`config.json
 | Claude usage target | `ACC_USAGE_TARGET` | `usageTarget` | `0.75` (75%) |
 | New agent base dir | `ACC_NEW_AGENT_BASE` | `newAgentBase` | `…/Lachys Web Dev` |
 | Agent → directory map | — | `agents` | built-in list |
-| Netlify webhook secret | `NETLIFY_WEBHOOK_SECRET` | — | _(none — unverified)_ |
-| Discord webhook URL (forms) | `NETLIFY_DISCORD_WEBHOOK` | — | _(none)_ |
+| Form webhook key | `ACC_FORM_KEY` | `formKey` | _(none — triage off unless set)_ |
+| Lead-triage provider | `ACC_LEAD_PROVIDER` | `leadProvider` | `claude` |
 
 Agents are discovered two ways: explicit entries in the `agents` map plus any subfolder under the memory root. An agent's memory log path:
 
@@ -235,7 +238,9 @@ Cloudflare prints a `https://random-words.trycloudflare.com` URL. Bookmark it on
 | DELETE | `/schedule/:id` | ✓ | Cancel a scheduled task |
 | POST | `/discord-op` | ✓ | Queue a Discord channel op |
 | GET | `/discord-ops` | ✓ | List pending Discord ops |
-| POST | `/netlify-webhook` | open | Netlify form → Discord notification |
+| GET | `/business/:file` | ✓ | Read `goals` or `money` log |
+| POST | `/business/goals/append` | ✓ | Append a captured goal |
+| POST | `/webhook/form?key=` | open* | Website form → #leads + Jarvis auto-triage (*key-guarded) |
 
 "✓" routes require the `ACC_SECRET` bearer token **only when a secret is configured**.
 

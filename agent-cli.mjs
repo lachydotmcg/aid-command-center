@@ -72,6 +72,16 @@ async function main() {
     return 0
   }
 
+  if (cmd === 'new-agent') {
+    // new-agent <name> [project-dir]  — scaffold a new specialist agent
+    const name = argv.shift()
+    const dir = argv.join(' ').trim() || undefined
+    if (!name) { console.error('usage: new-agent <name> [project-dir]'); return 2 }
+    const res = await postJSON('/new-agent', { name, dir })
+    console.log(`created agent "${res.agent}" at ${res.dir}`)
+    return 0
+  }
+
   if (cmd === 'run') {
     const { model, effort, provider, rest } = takeFlags(argv)
     const agent = rest.shift()
@@ -135,7 +145,7 @@ async function main() {
     return failed ? 1 : 0
   }
 
-  console.error('commands: list | run <agent> "<prompt>" [--codex] | swarm \'<json>\' | schedule every|in <min> <agent> "<prompt>" | discord archive|say|move …')
+  console.error('commands: list | new-agent <name> [dir] | run <agent> "<prompt>" [--codex] | swarm \'<json>\' | schedule every|in <min> <agent> "<prompt>" | discord archive|say|move …')
   return 2
 }
 
