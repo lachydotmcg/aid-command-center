@@ -52,12 +52,58 @@ const client = new Client({
 const GIFS = {
   thinking: 'https://tenor.com/view/monkey-thinking-monkey-thinking-think-money-gif-9734025314392564509',
   coding:   'https://tenor.com/view/kitten-keybo-lap-gif-19489640',
-  done:     'https://tenor.com/view/finished-im-so-done-wipe-hands-spongebob-gif-13963789363351788284',
+  done:     'https://tenor.com/view/anime-rimuru-tempest-リムル-テンペスト-gif-1758115167141810081',
   error:    'https://tenor.com/view/jesus-ballin-mars-bars-gif-19910027',
   reading:  'https://tenor.com/view/jack-black-opening-book-opening-box-jack-black-gif-2965523361044713223',
   waiting:  'https://tenor.com/view/the-deep-boys-chewing-gif-14784112',
+  emdash:   'https://tenor.com/view/reggie-star-english-yap-em-dash-gif-15553832020253429612',
+  neutral:  'https://tenor.com/view/bowser-fart-gif-11437563165283047467',
+  silly:    'https://tenor.com/view/kirk-speed-kirk-trying-not-to-laugh-speed-trying-not-to-laugh-charlie-kirk-gif-8859915067900253017',
+  money:    'https://tenor.com/view/daniel-larson-money-10-dollars-excited-im-rich-gif-9240755225353990096',
+  happy:    'https://tenor.com/view/anime-rimuru-tempest-リムル-テンペスト-gif-11181097571604475490',
+}
+const GIF_USES = {
+  thinking: 'agent thinking',
+  coding: 'agent working',
+  done: 'done',
+  error: 'error',
+  reading: 'reading/reference work',
+  waiting: 'waiting for Lachy',
+  emdash: 'em dash referenced',
+  neutral: 'neutral',
+  silly: 'Lachy made a mistake or is being silly',
+  money: 'money',
+  happy: 'happy',
+}
+const GIF_ALIASES = {
+  cash: 'money',
+  complete: 'done',
+  completed: 'done',
+  dash: 'emdash',
+  em: 'emdash',
+  emdash: 'emdash',
+  emdashes: 'emdash',
+  finished: 'done',
+  lachy: 'silly',
+  mistake: 'silly',
+  mistakes: 'silly',
+  ok: 'done',
+  rich: 'money',
 }
 function gif(key) { return GIFS[key] ? `\n${GIFS[key]}` : '' }
+function normalizeGifKey(raw) {
+  const key = String(raw || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+  if (GIFS[key]) return key
+  if (GIF_ALIASES[key]) return GIF_ALIASES[key]
+  if (key.includes('emdash') || key.includes('dash')) return 'emdash'
+  if (key.includes('mistake') || key.includes('silly') || key.includes('lachy')) return 'silly'
+  if (key.includes('money') || key.includes('cash') || key.includes('rich')) return 'money'
+  if (key.includes('happy')) return 'happy'
+  if (key.includes('done') || key.includes('complete') || key.includes('finish')) return 'done'
+}
+function gifList() {
+  return Object.keys(GIFS).map(k => `\`${k}\` - ${GIF_USES[k] || k}`).join('\n')
+}
 
 // ── Model / effort ──────────────────────────────────────────────────────────
 const VALID_MODELS  = ['opus', 'sonnet', 'haiku']
@@ -141,7 +187,7 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
   if (!res.ok) throw new Error(`Server returned ${res.status}`)
   const reader = res.body.getReader()
   const dec    = new TextDecoder()
-  let buf = '', output = '', working = false, exitCode = 0, cost = 0, durationMs = null
+  let buf = '', output = '', errorText = '', working = false, exitCode = 0, cost = 0, durationMs = null
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -155,12 +201,20 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
           output += evt.text
           if (!working) { working = true; onWorking?.() }
         }
-        if (evt.error) output += `[stderr] ${evt.error}`
+        if (evt.error) errorText += `${errorText ? '\n' : ''}${evt.error}`
         if (evt.done) { exitCode = evt.code ?? 0; cost = evt.cost ?? 0; durationMs = evt.durationMs ?? null }
       } catch {}
     }
   }
+  if (exitCode !== 0 && errorText.trim()) output += `\n\n[error]\n${errorText.trim().slice(-1200)}`
+  output = limitDiscordOutput(output)
   return { output: output.trim() || '(no output)', exitCode, cost, durationMs }
+}
+
+function limitDiscordOutput(text, limit = 6000) {
+  const s = String(text || '')
+  if (s.length <= limit) return s
+  return `${s.slice(0, limit)}\n\n[truncated for Discord: ${s.length.toLocaleString()} chars total; open the dashboard/logs for the full run]`
 }
 
 // Split long text into Discord-safe chunks
@@ -459,6 +513,7 @@ const HELP = `**AI Command Center**
 \`!activity\` — feed in #activity-feed when agents log new memories (\`!activity stop\`)
 \`!mirror\` — post delegated run output into each agent's channel (\`!mirror stop\`)
 \`!money\` — create the #money channel for Jarvis's revenue updates
+\`!gif <name|list>\` — post one of the agent reaction GIFs
 \`!archive <agent> [undo]\` — shelve/unshelve a project's channel
 \`!usage\` — usage / rate-limit status + spend today
 \`!manage [min]\` — Jarvis runs as a background manager every N min (\`!manage stop\`)
@@ -480,6 +535,24 @@ client.on('messageCreate', async (msg) => {
   // ── !help ────────────────────────────────────────────────────────────────
   if (cmd === 'help') {
     await msg.reply(HELP)
+    return
+  }
+
+  // ── !gif <name|list> ─────────────────────────────────────────────────────
+  if (cmd === 'gif') {
+    const requested = args.join(' ').trim()
+    if (!requested || requested.toLowerCase() === 'list') {
+      await msg.reply(`**Agent reaction GIFs**\n${gifList()}`)
+      return
+    }
+
+    const key = normalizeGifKey(requested)
+    if (!key) {
+      await msg.reply(`Unknown GIF: \`${requested}\`\n${gifList()}`)
+      return
+    }
+
+    await msg.reply(`_${GIF_USES[key] || key}_${gif(key)}`)
     return
   }
 
@@ -621,11 +694,24 @@ client.on('messageCreate', async (msg) => {
     const short = `\`${prompt.slice(0, 60)}${prompt.length > 60 ? '…' : ''}\``
     const statusMsg = await msg.reply(`🤔 **${agent}**${tagS} thinking…${gif('thinking')}\n${short}`)
 
+    let elapsed = 0
+    let hasOutput = false
+    const progressInterval = setInterval(async () => {
+      elapsed += 30
+      const tick = hasOutput
+        ? `⌨️ **${agent}**${tagS} still working… (${elapsed}s)${gif('coding')}\n${short}`
+        : `⏳ **${agent}**${tagS} thinking… (${elapsed}s)${gif('thinking')}\n${short}`
+      await statusMsg.edit(tick).catch(() => {})
+    }, 30000)
+
     try {
       const { output, exitCode, cost, durationMs } = await runAgent(agent, prompt, cont, async () => {
+        hasOutput = true
         // First output received — switch to coding GIF
         await statusMsg.edit(`⌨️ **${agent}**${tagS} working…${gif('coding')}\n${short}`).catch(() => {})
       }, { model, effort, provider })
+
+      clearInterval(progressInterval)
 
       const ok    = exitCode === 0
       const needsOk = /please approve|approval|waiting for (your|feedback|confirmation|input)|flagged|should i proceed|do you want me to|would you like me to|permission to|before i (make|write|edit|delete|remove|create)/i.test(output)
@@ -634,11 +720,12 @@ client.on('messageCreate', async (msg) => {
       const suffix  = needsOk ? '\n\n_Waiting for your approval — reply here or check the dashboard._' : ''
       const meta    = [cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
       const metaS   = meta ? `  \`${meta}\`` : ''
-      // Post prose WITHOUT code fences so Discord renders markdown (**bold**, etc.)
-      const parts   = chunks(output)
+      // 1700-char chunks leave room for the header/GIF/suffix overhead (~300 chars) within Discord's 2000-char limit
+      const parts   = chunks(output, 1700)
       await statusMsg.edit(`${icon} **${agent}**${tagS}${metaS} ›${endGif}\n${parts[0]}${parts.length === 1 ? suffix : ''}`)
       for (let i = 1; i < parts.length; i++) await msg.channel.send(parts[i] + (i === parts.length - 1 ? suffix : ''))
     } catch (e) {
+      clearInterval(progressInterval)
       await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`)
     }
     return
@@ -688,7 +775,7 @@ client.on('messageCreate', async (msg) => {
       await statusMsg.edit(`🐝 **Swarm done** — ${data.count} agents · 💰 $${data.totalCost.toFixed(4)}${fails ? ` · ⚠️ ${fails} failed` : ''}${fails ? gif('error') : gif('done')}`)
       for (const t of data.tasks) {
         const head = `${t.exitCode === 0 ? '✅' : '⚠️'} **${t.agent}**${t.error ? ` (${t.error})` : ''}${t.cost ? ` \`$${t.cost.toFixed(4)}\`` : ''}`
-        for (const part of chunks(t.output || '(no output)')) {
+        for (const part of chunks(limitDiscordOutput(t.output || '(no output)'), 1800)) {
           await msg.channel.send(`${head}\n${part}`)
         }
       }
@@ -795,13 +882,19 @@ client.on('messageCreate', async (msg) => {
     const memDir = `C:\\Users\\nirke\\OneDrive\\Documents\\Obsidian\\Lachy\\agent-memory\\${agent}\\${today}.md`
     const logPrompt = `Write your session memory log now for handover. Append (don't overwrite) a new entry to \`${memDir}\` using the standard template: ## What I did, ## Files changed, ## Errors / blockers, ## Flags for Lachy 🚩, ## Status. Summarise everything done in this session concisely. If the file or folder doesn't exist, create it. Confirm in one line when done.`
     const statusMsg = await msg.reply(`📝 **${agent}** writing memory log…${gif('thinking')}`)
+    let logElapsed = 0
+    const logProgressInterval = setInterval(async () => {
+      logElapsed += 30
+      await statusMsg.edit(`📝 **${agent}** writing memory log… (${logElapsed}s)${gif('coding')}`).catch(() => {})
+    }, 30000)
     try {
       const { output, exitCode, cost } = await runAgent(agent, logPrompt, true, async () => {
         await statusMsg.edit(`📝 **${agent}** writing memory log…${gif('coding')}`).catch(() => {})
       })
+      clearInterval(logProgressInterval)
       const icon = exitCode === 0 ? '✅' : '⚠️'
       await statusMsg.edit(`${icon} **${agent}** memory log${cost > 0 ? ` \`$${cost.toFixed(4)}\`` : ''}${gif('done')}\n\`\`\`\n${(output || '(done)').slice(0, 1500)}\n\`\`\``)
-    } catch (e) { await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`) }
+    } catch (e) { clearInterval(logProgressInterval); await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`) }
     return
   }
 
@@ -820,7 +913,7 @@ client.on('messageCreate', async (msg) => {
       }
       out += `\n🎯 Target ceiling: ${Math.round((u.target || 0.75) * 100)}%`
       out += `\n🟢 Codex today: ~${(u.codexTokensToday || 0).toLocaleString()} tokens`
-      out += `\n💰 Claude spend today: $${(u.costToday || 0).toFixed(3)}`
+      out += `\n💰 Claude spend today: $${(u.costToday || 0).toFixed(3)}${gif('money')}`
       await msg.reply(out)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
@@ -937,7 +1030,7 @@ client.on('messageCreate', async (msg) => {
     try {
       const cat = await ensureCategory(guild, CATEGORIES.cc)
       const { ch } = await ensureTextChannel(guild, 'money', cat.id, 'Monthly revenue + business goals — posted by Jarvis')
-      await msg.reply(`💰 Money channel ready: <#${ch.id}>. Jarvis posts monthly revenue + goals updates here (and on the 1st of each month).`)
+      await msg.reply(`💰 Money channel ready: <#${ch.id}>. Jarvis posts monthly revenue + goals updates here (and on the 1st of each month).${gif('money')}`)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }
@@ -1031,7 +1124,7 @@ client.on('messageCreate', async (msg) => {
 
 client.once('ready', () => {
   console.log(`✅ Discord bot online as ${client.user.tag}`)
-  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, archive, usage, manage, schedule, sync, status`)
+  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, gif, archive, usage, manage, schedule, sync, status`)
   startBoardLoop()    // resume the pinned status board if one was set before restart
   startActivityLoop() // resume the activity feed if one was set before restart
   startMirrorLoop()   // resume run mirroring if it was enabled before restart
