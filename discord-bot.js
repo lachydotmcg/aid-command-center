@@ -71,19 +71,25 @@ const agentDefaults = new Map() // agent -> { model, effort }
 function parseRunFlags(words, agent) {
   const def = agentDefaults.get(agent) || {}
   let model = def.model, effort = def.effort, provider = def.provider
-  const rest = []
-  for (let i = 0; i < words.length; i++) {
+  // Only consume LEADING dashed flags. Stop at the first normal word so flag-like
+  // words inside the prompt (e.g. "Codex", "--codex", "haiku") are left untouched.
+  let i = 0
+  for (; i < words.length; i++) {
     const w = words[i], lw = w.toLowerCase()
+    const dashed = /^--?/.test(w)
+    if (!dashed) break
     const bare = lw.replace(/^--?/, '')
     if (bare === 'codex') { provider = 'codex'; continue }
     if (bare === 'claude') { provider = 'claude'; continue }
-    if (VALID_MODELS.includes(bare) && /^--?/.test(w)) { model = bare; continue }
+    if (VALID_MODELS.includes(bare)) { model = bare; continue }
     if ((lw === '--model' || lw === '-m') && words[i + 1]) { model = words[++i].toLowerCase(); continue }
     if ((lw === '--effort' || lw === '-e') && words[i + 1]) { effort = words[++i].toLowerCase(); continue }
     if (lw === '--provider' && words[i + 1]) { provider = words[++i].toLowerCase(); continue }
-    rest.push(w)
+    break // unknown dashed token — treat as start of prompt
   }
-  return { model, effort, provider, rest: rest.join(' ') }
+  // A Claude model alias is meaningless to Codex — drop it so we don't send "haiku" to GPT.
+  if (provider === 'codex' && VALID_MODELS.includes(model)) model = undefined
+  return { model, effort, provider, rest: words.slice(i).join(' ') }
 }
 
 // ── Active-hours parser ───────────────────────────────────────────────────────
@@ -832,16 +838,31 @@ client.on('messageCreate', async (msg) => {
         await msg.reply('🧭 Jarvis manager loop stopped.')
         return
       }
+      if (args[0] === 'codex') {
+        const on = args[1] !== 'off'
+        const everyMin = existing[0]?.everyMin || 60
+        const activeHours = existing[0]?.activeHours || undefined
+        for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
+        await fetch(`${SERVER_URL}/schedule`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'manager', everyMin, activeHours, preferCodex: on }),
+        })
+        await msg.reply(on
+          ? '🟢 **Manager now PREFERS Codex** for every worker task — Claude is reserved (only Jarvis\'s own thinking uses it). `!manage codex off` to revert.'
+          : '↩️ Manager back to auto: Claude until ~90%, then Codex.')
+        return
+      }
       if (args[0] === 'hours') {
         const spec = args.slice(1).join(' ').trim()
         if (!spec) { await msg.reply('Usage: `!manage hours mon-fri 9-17` or `!manage hours mon-wed 7-17, thu 7-13`'); return }
         let activeHours
         try { activeHours = parseActiveHours(spec) } catch (e) { await msg.reply(`❌ Invalid hours spec: ${e.message}\nExample: \`mon-fri 9-17\` or \`mon-wed 7-17, thu 7-13\``); return }
         const everyMin = existing[0]?.everyMin || 60
+        const preferCodex = existing[0]?.preferCodex || false
         for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
         const res = await fetch(`${SERVER_URL}/schedule`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'manager', everyMin, activeHours }),
+          body: JSON.stringify({ type: 'manager', everyMin, activeHours, preferCodex }),
         })
         const d = await res.json()
         const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -850,13 +871,14 @@ client.on('messageCreate', async (msg) => {
         return
       }
       const everyMin = parseInt(args[0], 10) || 60
+      const preferCodex = existing[0]?.preferCodex || false
       for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' }) // replace
       const res = await fetch(`${SERVER_URL}/schedule`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'manager', everyMin }),
+        body: JSON.stringify({ type: 'manager', everyMin, preferCodex }),
       })
       const d = await res.json()
-      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels). First tick in ${everyMin} min. \`!manage stop\` to end · \`!manage hours mon-fri 9-17\` to restrict hours.\n_Make sure \`!mirror\` is on so you see what it does._`)
+      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels)${preferCodex ? ' · 🟢 Codex-preferred' : ''}. First tick in ${everyMin} min. \`!manage stop\` to end · \`!manage hours mon-fri 9-17\` · \`!manage codex\` to save Claude.\n_Make sure \`!mirror\` is on so you see what it does._`)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }

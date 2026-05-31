@@ -464,7 +464,11 @@ function runCodex({ run, prompt, model, cwd, onText }) {
 // Single entry point: picks Claude or Codex based on run.provider.
 function dispatchRun({ run, cwd, prompt, fullPrompt, continueSession, model, effort, delegate, onText }) {
   if (run.provider === 'codex') {
-    return runCodex({ run, prompt: fullPrompt ?? prompt, model, cwd, onText })
+    // Codex (ChatGPT account) rejects Claude model names (opus/sonnet/haiku);
+    // only forward a genuine Codex model, else let Codex use its default.
+    const codexModel = model && !VALID_MODELS.includes(model) ? model : null
+    run.model = codexModel
+    return runCodex({ run, prompt: fullPrompt ?? prompt, model: codexModel, cwd, onText })
   }
   const args = buildArgs({ continueSession, model, effort, prompt, fullPrompt, delegate })
   return runClaude({ run, args, cwd, onText })
@@ -701,6 +705,7 @@ async function runScheduledTask(t) {
   try {
     if (t.type === 'manager') {
       let briefing = await buildManagerBriefing()
+      if (t.preferCodex) briefing += `\n\n⚙️ PREFER CODEX: Lachy values Claude usage highly — route EVERY worker delegation to Codex (\`--codex\`) regardless of Claude state. Keep only your own thinking on Claude.`
       if (t.prompt) briefing += `\n\nSPECIAL DIRECTIVE THIS TICK:\n${t.prompt}`
       // Coherent Jarvis: resume its one thread if it exists, else fresh (the
       // briefing already carries memory). Same logic as !run jarvis, so manager
@@ -753,6 +758,7 @@ app.post('/schedule', (req, res) => {
     everyMin: everyMin ? Number(everyMin) : null, runAt: runAt ? Number(runAt) : null,
     nextRun: runAt ? Number(runAt) : now + (Number(everyMin) || 0) * 60000,
     activeHours: Array.isArray(activeHours) ? activeHours : null,
+    preferCodex: !!(req.body || {}).preferCodex,
     enabled: true, createdAt: now,
   }
   list.push(task); saveSchedule(list)
