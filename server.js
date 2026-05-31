@@ -630,6 +630,11 @@ const DAILY_BUDGET = Number(pick('ACC_DAILY_BUDGET', 'dailyBudget', 5)) // soft 
 const DAY_START = Number(pick('ACC_DAY_START', 'dayStart', 8))
 const DAY_END   = Number(pick('ACC_DAY_END', 'dayEnd', 22))
 function isDaytime() { const h = new Date().getHours(); return h >= DAY_START && h < DAY_END }
+function isWithinActiveHours(activeHours) {
+  if (!activeHours || !activeHours.length) return true
+  const now = new Date(), day = now.getDay(), hour = now.getHours()
+  return activeHours.some(e => Array.isArray(e.days) && e.days.includes(day) && hour >= e.start && hour < e.end)
+}
 let schedSeq = 0
 function loadSchedule() { try { return JSON.parse(fs.readFileSync(SCHEDULE_FILE, 'utf8')) } catch { return [] } }
 function saveSchedule(list) { try { fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(list, null, 2)) } catch {} }
@@ -716,6 +721,13 @@ async function schedulerTick() {
   let changed = false
   for (const t of list) {
     if (!t.enabled || t.nextRun > now) continue
+    if (t.type === 'manager' && !isWithinActiveHours(t.activeHours)) {
+      console.log(`[sched ${t.id}] skipping manager tick (outside active hours)`)
+      if (t.everyMin) t.nextRun = now + t.everyMin * 60000
+      else t.enabled = false
+      changed = true
+      continue
+    }
     console.log(`[sched ${t.id}] firing ${t.type} ${t.agent || ''}`)
     runScheduledTask(t) // fire-and-forget so the tick stays responsive
     if (t.everyMin) t.nextRun = now + t.everyMin * 60000
@@ -726,9 +738,10 @@ async function schedulerTick() {
 }
 setInterval(schedulerTick, 60000)
 
-// POST /schedule — create a task. body: { type, agent, prompt, model, effort, everyMin, runAt }
+// POST /schedule — create a task. body: { type, agent, prompt, model, effort, everyMin, runAt, activeHours }
+// activeHours (manager tasks only): [{days:[0-6], start:<hour>, end:<hour>}] — local time; omit for always-active.
 app.post('/schedule', (req, res) => {
-  const { type = 'agent', agent, prompt, model, effort, everyMin, runAt, provider } = req.body || {}
+  const { type = 'agent', agent, prompt, model, effort, everyMin, runAt, provider, activeHours } = req.body || {}
   if (type === 'agent' && (!agent || !prompt?.trim())) return res.status(400).json({ error: 'agent + prompt required' })
   if (!everyMin && !runAt) return res.status(400).json({ error: 'everyMin or runAt required' })
   const list = loadSchedule()
@@ -739,6 +752,7 @@ app.post('/schedule', (req, res) => {
     provider: provider === 'codex' ? 'codex' : 'claude',
     everyMin: everyMin ? Number(everyMin) : null, runAt: runAt ? Number(runAt) : null,
     nextRun: runAt ? Number(runAt) : now + (Number(everyMin) || 0) * 60000,
+    activeHours: Array.isArray(activeHours) ? activeHours : null,
     enabled: true, createdAt: now,
   }
   list.push(task); saveSchedule(list)

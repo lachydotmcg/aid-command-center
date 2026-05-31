@@ -86,6 +86,37 @@ function parseRunFlags(words, agent) {
   return { model, effort, provider, rest: rest.join(' ') }
 }
 
+// ── Active-hours parser ───────────────────────────────────────────────────────
+// Parses specs like 'mon-wed 7-17, thu 7-13' into [{days:[1,2,3],start:7,end:17},…]
+const DAY_NAMES = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+function parseActiveHours(spec) {
+  const segments = spec.split(',').map(s => s.trim()).filter(Boolean)
+  if (!segments.length) throw new Error('empty spec')
+  const result = []
+  for (const seg of segments) {
+    const parts = seg.split(/\s+/)
+    if (parts.length < 2) throw new Error(`expected "<days> <start-end>", got "${seg}"`)
+    const daySpec = parts[0].toLowerCase()
+    const [sStr, eStr] = parts[1].split('-')
+    const start = parseInt(sStr, 10), end = parseInt(eStr, 10)
+    if (isNaN(start) || isNaN(end)) throw new Error(`bad hours "${parts[1]}" — use e.g. 7-17`)
+    let days = []
+    if (daySpec.includes('-')) {
+      const [a, b] = daySpec.split('-')
+      const from = DAY_NAMES[a], to = DAY_NAMES[b]
+      if (from === undefined || to === undefined) throw new Error(`unknown day in "${daySpec}"`)
+      if (from <= to) { for (let d = from; d <= to; d++) days.push(d) }
+      else { for (let d = from; d <= 6; d++) days.push(d); for (let d = 0; d <= to; d++) days.push(d) }
+    } else {
+      const d = DAY_NAMES[daySpec]
+      if (d === undefined) throw new Error(`unknown day "${daySpec}"`)
+      days = [d]
+    }
+    result.push({ days, start, end })
+  }
+  return result
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function api(path) {
@@ -425,6 +456,7 @@ const HELP = `**AI Command Center**
 \`!archive <agent> [undo]\` — shelve/unshelve a project's channel
 \`!usage\` — usage / rate-limit status + spend today
 \`!manage [min]\` — Jarvis runs as a background manager every N min (\`!manage stop\`)
+\`!manage hours mon-fri 9-17\` — restrict manager ticks to active hours (e.g. \`mon-wed 7-17, thu 7-13\`)
 \`!schedule …\` — \`list\` · \`every <min> <agent> <prompt>\` · \`in <min> …\` · \`cancel <id>\`
 \`!sync\` — build 🤖 Core / 🌐 Web Dev categories + a channel per agent
 \`!status\` — server heartbeat
@@ -788,15 +820,33 @@ client.on('messageCreate', async (msg) => {
     return
   }
 
-  // ── !manage [everyMin|stop] ─────────────────────────────────────────────────
+  // ── !manage [everyMin|stop|hours <spec>] ───────────────────────────────────
   // Turns Jarvis into a background manager: every N minutes it reviews to-dos +
   // usage and decides what to do (delegating as needed). Default 60 min.
+  // !manage hours <spec> restricts ticks to active hours (e.g. mon-fri 9-17).
   if (cmd === 'manage') {
     try {
       const existing = (await api('/schedule') || []).filter(t => t.type === 'manager')
       if (args[0] === 'stop') {
         for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
         await msg.reply('🧭 Jarvis manager loop stopped.')
+        return
+      }
+      if (args[0] === 'hours') {
+        const spec = args.slice(1).join(' ').trim()
+        if (!spec) { await msg.reply('Usage: `!manage hours mon-fri 9-17` or `!manage hours mon-wed 7-17, thu 7-13`'); return }
+        let activeHours
+        try { activeHours = parseActiveHours(spec) } catch (e) { await msg.reply(`❌ Invalid hours spec: ${e.message}\nExample: \`mon-fri 9-17\` or \`mon-wed 7-17, thu 7-13\``); return }
+        const everyMin = existing[0]?.everyMin || 60
+        for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
+        const res = await fetch(`${SERVER_URL}/schedule`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'manager', everyMin, activeHours }),
+        })
+        const d = await res.json()
+        const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        const desc = activeHours.map(e => `${e.days.map(d => DAY_LABELS[d]).join('/')} ${e.start}:00–${e.end}:00`).join(', ')
+        await msg.reply(`🧭 **Jarvis manager hours set** — ticks every ${everyMin} min, active: ${desc}\n\`!manage stop\` to end · \`!manage [min]\` to restart without hour restrictions`)
         return
       }
       const everyMin = parseInt(args[0], 10) || 60
@@ -806,7 +856,7 @@ client.on('messageCreate', async (msg) => {
         body: JSON.stringify({ type: 'manager', everyMin }),
       })
       const d = await res.json()
-      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels). First tick in ${everyMin} min. \`!manage stop\` to end.\n_Make sure \`!mirror\` is on so you see what it does._`)
+      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels). First tick in ${everyMin} min. \`!manage stop\` to end · \`!manage hours mon-fri 9-17\` to restrict hours.\n_Make sure \`!mirror\` is on so you see what it does._`)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }
