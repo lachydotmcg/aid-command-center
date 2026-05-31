@@ -771,9 +771,15 @@ client.on('messageCreate', async (msg) => {
       const suffix  = needsOk ? '\n\n_Waiting for your approval — reply here or check the dashboard._' : ''
       const meta    = [provider === 'codex' && '🟢 codex', cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
       const metaS   = meta ? `  \`${meta}\`` : ''
-      const parts   = chunks(output, 1700)
-      await statusMsg.edit(`${icon} **${agent}**${tagS}${metaS} ›${endGif}\n${parts[0]}${parts.length === 1 ? suffix : ''}`)
-      for (let i = 1; i < parts.length; i++) await msg.channel.send(parts[i] + (i === parts.length - 1 ? suffix : ''))
+      // Header-aware split: size the first chunk to whatever's left under 2000 after
+      // the header/GIF, so the edited message can never exceed Discord's limit.
+      const head    = `${icon} **${agent}**${tagS}${metaS} ›${endGif}\n`
+      const firstBudget = Math.max(200, 1990 - head.length)
+      const firstPart = output.slice(0, firstBudget)
+      const rest = output.slice(firstPart.length)
+      const restParts = chunks(rest, 1900)
+      await statusMsg.edit(head + firstPart + (restParts.length === 0 ? suffix : ''))
+      for (let i = 0; i < restParts.length; i++) await msg.channel.send(restParts[i] + (i === restParts.length - 1 ? suffix : ''))
       // Cheeky: react when the model drops an em dash.
       if (/—/.test(output) && Math.random() < 0.5) await msg.channel.send(gif('emdash')).catch(() => {})
     } catch (e) {
