@@ -4,6 +4,10 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Single-instance lock — stops duplicate trays (which caused multiple servers).
+$global:accMutex = New-Object System.Threading.Mutex($false, 'Global\AICommandCenterTray')
+if (-not $global:accMutex.WaitOne(0)) { exit }
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
 
