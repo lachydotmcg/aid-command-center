@@ -59,6 +59,10 @@ const ACC_SECRET  = pick('ACC_SECRET', 'secret', null) || null
 // Default parent directory for agents scaffolded via POST /new-agent.
 const NEW_AGENT_BASE = pick('ACC_NEW_AGENT_BASE', 'newAgentBase',
   'C:\\Users\\nirke\\OneDrive\\Documents\\Lachys Web Dev')
+// Website form webhook: optional shared key (?key=) to stop random internet POSTs
+// from triggering agent runs, and which provider triages each lead.
+const FORM_KEY = pick('ACC_FORM_KEY', 'formKey', null) || null
+const LEAD_PROVIDER = pick('ACC_LEAD_PROVIDER', 'leadProvider', 'claude') // claude can also write money-log.md
 
 // claude.exe is bundled with the Claude desktop app — not on system PATH.
 // Find the latest installed version dynamically (Windows default), or honour an
@@ -164,19 +168,31 @@ app.get('/status', (_, res) =>
 // { payload: { data, form_name, site_url } } shape and plain JSON.
 app.post('/webhook/form', (req, res) => {
   try {
+    // If a key is configured, require it — stops random internet POSTs from
+    // spawning agent runs. Without a key, triage stays off unless explicitly on.
+    if (FORM_KEY && req.query.key !== FORM_KEY) return res.status(401).json({ error: 'bad or missing key' })
     const p = req.body?.payload || req.body || {}
     const data = p.data || p
     const formName = p.form_name || data._form || data._formName || 'form'
     const site = p.site_url || data._site || req.query.site || ''
     const skip = new Set(['_form', '_formName', '_site', 'form-name', 'bot-field', 'g-recaptcha-response'])
-    const lines = Object.entries(data)
-      .filter(([k, v]) => !skip.has(k) && typeof v !== 'object' && String(v).trim())
-      .map(([k, v]) => `**${k}:** ${String(v).slice(0, 300)}`)
-    const text = `📥 **New form submission** — ${formName}${site ? ` (${site})` : ''}\n${lines.join('\n') || '(no fields)'}`
+    const fields = Object.entries(data).filter(([k, v]) => !skip.has(k) && typeof v !== 'object' && String(v).trim())
+    const lines = fields.map(([k, v]) => `**${k}:** ${String(v).slice(0, 300)}`)
+
+    // 1) Notify #leads (always).
     const list = loadOps()
-    list.push({ id: `o${++opSeq}`, op: 'say', channel: 'leads', text: text.slice(0, 1900), ensure: true, createdAt: Date.now() })
+    list.push({ id: `o${++opSeq}`, op: 'say', channel: 'leads', text: `📥 **New form submission** — ${formName}${site ? ` (${site})` : ''}\n${lines.join('\n') || '(no fields)'}`.slice(0, 1900), ensure: true, createdAt: Date.now() })
     saveOps(list)
-    res.json({ ok: true })
+
+    // 2) Auto-triage via Jarvis — safe to spawn only when keyed, or explicitly enabled.
+    const triageOn = FORM_KEY ? true : (pick('ACC_LEAD_TRIAGE', 'leadTriage', '0') === '1')
+    if (triageOn) {
+      const prompt = `A new website lead just arrived via the "${formName}" form${site ? ` on ${site}` : ''}:\n\n${lines.join('\n')}\n\nTriage this lead: (1) add a row to the pipeline table in business/money-log.md, (2) draft a short, friendly reply email Lachy can send, (3) give a one-line recommended next step (and a good time to follow up). Be concise.`
+      const prov = LEAD_PROVIDER === 'codex' ? 'codex' : 'claude'
+      const run = newRun({ agent: 'jarvis', prompt: `[lead] ${formName}`, source: 'lead', provider: prov, model: prov === 'claude' ? 'haiku' : null })
+      dispatchRun({ run, cwd: agentCwd('jarvis'), prompt, fullPrompt: prompt, continueSession: false, model: run.model, delegate: false }) // fire-and-forget
+    }
+    res.json({ ok: true, triaged: triageOn })
   } catch (e) { res.status(400).json({ error: e.message }) }
 })
 

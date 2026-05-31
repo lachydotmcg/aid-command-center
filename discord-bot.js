@@ -461,7 +461,7 @@ async function pollMirror() {
   const seen = new Set(state.seen || [])
 
   // Mirror finished delegated / scheduled / manager runs we haven't posted yet.
-  const MIRROR_SOURCES = ['agent', 'swarm', 'schedule', 'manager']
+  const MIRROR_SOURCES = ['agent', 'swarm', 'schedule', 'manager', 'lead']
   const fresh = (data.recent || []).filter(r => MIRROR_SOURCES.includes(r.source) && !seen.has(r.id))
 
   for (const r of fresh.reverse()) {
@@ -470,7 +470,7 @@ async function pollMirror() {
     if (!ch) continue
     const parentName = r.parent && idToAgent[r.parent] ? idToAgent[r.parent] : (r.parent === 'swarm' || r.parent === 'discord-swarm' ? 'swarm' : null)
     const meta = [r.provider === 'codex' && '🟢codex', r.model && `🧠${r.model}`, r.cost > 0 && `$${r.cost.toFixed(3)}`].filter(Boolean).join(' · ')
-    const label = r.source === 'manager' ? '🧭 manager tick' : r.source === 'schedule' ? '⏰ scheduled' : `🔗 delegated${parentName ? ` by ${parentName}` : ''}`
+    const label = r.source === 'manager' ? '🧭 manager tick' : r.source === 'schedule' ? '⏰ scheduled' : r.source === 'lead' ? '📥 new lead triage' : `🔗 delegated${parentName ? ` by ${parentName}` : ''}`
     // Post under the agent's own identity (webhook), so it reads as the agent talking.
     try {
       await postAsAgent(ch, r.agent, `_${label}${meta ? ` · ${meta}` : ''}_\n> ${(r.prompt || '').slice(0, 120)}\n\n${r.output || '(no output captured)'}`)
@@ -1095,7 +1095,7 @@ client.on('messageCreate', async (msg) => {
     try {
       const cat = await ensureCategory(guild, CATEGORIES.cc)
       const { ch } = await ensureTextChannel(guild, 'leads', cat.id, 'Website form submissions land here')
-      await msg.reply(`📥 Leads channel ready: <#${ch.id}>.\nWire your site forms to POST submissions to:\n\`${SERVER_URL}/webhook/form\`\n_(Netlify: Site → Forms → Notifications → Outgoing webhook. Exposes via your tunnel URL when public.)_`)
+      await msg.reply(`📥 Leads channel ready: <#${ch.id}>.\nWire your site forms to POST to:\n\`${SERVER_URL}/webhook/form?key=YOURKEY\`\n_(Netlify: Site → Forms → Notifications → Outgoing webhook → use your tunnel URL.)_\nEach lead posts here **and** Jarvis auto-triages it (adds to pipeline, drafts a reply, suggests next step) → shows in <#${ch.id}> + #jarvis.\n⚠️ Set \`ACC_FORM_KEY\` in .env and use it as \`?key=\` so randoms can't trigger runs.`)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }
