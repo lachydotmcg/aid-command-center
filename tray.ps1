@@ -17,10 +17,8 @@ function Stop-Acc {
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 function Start-Acc {
-  # Hidden cmd windows so output can be redirected to log files.
-  Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','node server.js >> server.log 2>&1' -WorkingDirectory $here -WindowStyle Hidden
-  Start-Sleep -Milliseconds 800
-  Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','node --env-file=.env discord-bot.js >> bot.log 2>&1' -WorkingDirectory $here -WindowStyle Hidden
+  # Use start.bat — the proven launcher (server + bot + opens the dashboard).
+  Start-Process -FilePath (Join-Path $here 'start.bat') -WorkingDirectory $here
 }
 
 $ni = New-Object System.Windows.Forms.NotifyIcon
