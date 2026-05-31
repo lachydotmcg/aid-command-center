@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "bot": "node --env-file=.env discord-bot.js"
+    "start": "node --env-file-if-exists=.env server.js",
+    "bot": "node --env-file-if-exists=.env discord-bot.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",

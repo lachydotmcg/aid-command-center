@@ -158,6 +158,28 @@ app.get(['/', '/index.html'], (_, res) => res.sendFile(path.join(__dir, 'index.h
 app.get('/status', (_, res) =>
   res.json({ ok: true, time: new Date().toISOString(), authRequired: !!ACC_SECRET }))
 
+// POST /webhook/form — public endpoint for website form submissions (e.g. Netlify
+// form notifications). Auth-exempt so external sites can POST. Drops a message
+// into the Discord #leads channel via the ops queue. Handles Netlify's
+// { payload: { data, form_name, site_url } } shape and plain JSON.
+app.post('/webhook/form', (req, res) => {
+  try {
+    const p = req.body?.payload || req.body || {}
+    const data = p.data || p
+    const formName = p.form_name || data._form || data._formName || 'form'
+    const site = p.site_url || data._site || req.query.site || ''
+    const skip = new Set(['_form', '_formName', '_site', 'form-name', 'bot-field', 'g-recaptcha-response'])
+    const lines = Object.entries(data)
+      .filter(([k, v]) => !skip.has(k) && typeof v !== 'object' && String(v).trim())
+      .map(([k, v]) => `**${k}:** ${String(v).slice(0, 300)}`)
+    const text = `📥 **New form submission** — ${formName}${site ? ` (${site})` : ''}\n${lines.join('\n') || '(no fields)'}`
+    const list = loadOps()
+    list.push({ id: `o${++opSeq}`, op: 'say', channel: 'leads', text: text.slice(0, 1900), ensure: true, createdAt: Date.now() })
+    saveOps(list)
+    res.json({ ok: true })
+  } catch (e) { res.status(400).json({ error: e.message }) }
+})
+
 // Everything below requires auth (no-op when ACC_SECRET is unset).
 app.use(requireAuth)
 
@@ -301,6 +323,28 @@ app.get('/logs/:agent', (req, res) => {
   const log = latestLog(req.params.agent)
   if (!log) return res.status(404).json({ error: 'No logs found' })
   res.json(log)
+})
+
+// Business files (goals + money log) live next to the memory root.
+const BUSINESS_DIR = path.join(path.dirname(MEMORY_ROOT), 'business')
+app.get('/business/:file', (req, res) => {
+  const allowed = { goals: 'goals.md', money: 'money-log.md' }
+  const name = allowed[req.params.file]
+  if (!name) return res.status(404).json({ error: 'unknown file' })
+  try { res.json({ file: name, content: fs.readFileSync(path.join(BUSINESS_DIR, name), 'utf8') }) }
+  catch { res.json({ file: name, content: '' }) }
+})
+// Append a captured note to goals.md (so Lachy/Jarvis can quick-add a goal).
+app.post('/business/goals/append', (req, res) => {
+  const note = (req.body?.note || '').toString().trim()
+  if (!note) return res.status(400).json({ error: 'note required' })
+  try {
+    fs.mkdirSync(BUSINESS_DIR, { recursive: true })
+    const p = path.join(BUSINESS_DIR, 'goals.md')
+    const stamp = new Date().toISOString().slice(0, 10)
+    fs.appendFileSync(p, `\n- [ ] (${stamp}) ${note}`)
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.get('/logs/:agent/all', (req, res) => {

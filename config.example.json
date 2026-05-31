@@ -8,6 +8,12 @@
   "secret": "",
 
   "claudeExe": "",
+  "codexExe": "",
+  "codexSandbox": "workspace-write",
+  "codexDiskFullRead": true,
+  "codexAddDirs": [
+    "C:\\Users\\you\\Documents\\agent-memory"
+  ],
 
   "agents": {
     "my-project": "C:\\path\\to\\my-project",

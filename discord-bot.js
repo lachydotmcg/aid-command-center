@@ -104,6 +104,13 @@ function normalizeGifKey(raw) {
 function gifList() {
   return Object.keys(GIFS).map(k => `\`${k}\` - ${GIF_USES[k] || k}`).join('\n')
 }
+// Pick the closing GIF for a finished run — contextual celebration.
+function endGifFor(output, ok, needsOk) {
+  if (needsOk) return gif('waiting')
+  if (!ok) return gif('error')
+  if (/\$\s?\d|revenue|earn(ed|ing)?|\bpaid\b|client|invoice|sale\b/i.test(output)) return gif('money')
+  return gif(Math.random() < 0.4 ? 'happy' : 'done') // variety on success
+}
 
 // ── Model / effort ──────────────────────────────────────────────────────────
 const VALID_MODELS  = ['opus', 'sonnet', 'haiku']
@@ -188,6 +195,7 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
   const reader = res.body.getReader()
   const dec    = new TextDecoder()
   let buf = '', output = '', errorText = '', working = false, exitCode = 0, cost = 0, durationMs = null
+  let lastProg = 0
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -200,6 +208,10 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
         if (evt.text) {
           output += evt.text
           if (!working) { working = true; onWorking?.() }
+          // Live stream: hand the caller the growing text, throttled (~1.8s) to
+          // stay under Discord's edit rate limit.
+          const now = Date.now()
+          if (opts.onProgress && now - lastProg > 1800) { lastProg = now; opts.onProgress(output) }
         }
         if (evt.error) errorText += `${errorText ? '\n' : ''}${evt.error}`
         if (evt.done) { exitCode = evt.code ?? 0; cost = evt.cost ?? 0; durationMs = evt.durationMs ?? null }
@@ -399,6 +411,35 @@ async function setAgentTopic(guild, agent, log) {
   ch.setTopic(topic).catch(() => {})
 }
 
+// ── Per-agent webhook identities ──────────────────────────────────────────────
+// Posts into a channel under the AGENT's name (and a little emoji), so the server
+// reads like a team of distinct agents rather than one bot narrating.
+const webhookCache = new Map() // channelId -> Webhook | null
+function prettyAgent(a) {
+  if (a === 'jarvis') return 'Jarvis 🧠'
+  return `${a} 🦀`.slice(0, 80)
+}
+async function getWebhook(channel) {
+  if (webhookCache.has(channel.id)) return webhookCache.get(channel.id)
+  let wh = null
+  try {
+    const hooks = await channel.fetchWebhooks()
+    wh = hooks.find(h => h.name === 'ACC' && h.token) || null
+    if (!wh) wh = await channel.createWebhook({ name: 'ACC' })
+  } catch { wh = null }
+  webhookCache.set(channel.id, wh)
+  return wh
+}
+// Send content as the agent (via webhook) — falls back to a normal bot message.
+async function postAsAgent(channel, agent, content) {
+  const parts = chunks(content, 1900)
+  const wh = await getWebhook(channel)
+  for (const p of parts) {
+    if (wh) { try { await wh.send({ content: p, username: prettyAgent(agent) }); continue } catch {} }
+    await channel.send(p).catch(() => {})
+  }
+}
+
 // ── Run mirror ────────────────────────────────────────────────────────────────
 // Watches the run registry and posts the OUTPUT of delegated runs (source agent
 // /swarm — e.g. work Jarvis handed off) into the matching agent's channel, so a
@@ -428,12 +469,11 @@ async function pollMirror() {
     const ch = findAgentChannel(guild, r.agent)
     if (!ch) continue
     const parentName = r.parent && idToAgent[r.parent] ? idToAgent[r.parent] : (r.parent === 'swarm' || r.parent === 'discord-swarm' ? 'swarm' : null)
-    const meta = [r.model && `🧠${r.model}`, r.cost > 0 && `$${r.cost.toFixed(3)}`].filter(Boolean).join(' · ')
+    const meta = [r.provider === 'codex' && '🟢codex', r.model && `🧠${r.model}`, r.cost > 0 && `$${r.cost.toFixed(3)}`].filter(Boolean).join(' · ')
     const label = r.source === 'manager' ? '🧭 manager tick' : r.source === 'schedule' ? '⏰ scheduled' : `🔗 delegated${parentName ? ` by ${parentName}` : ''}`
-    const head = `**${r.agent}** — ${label}${meta ? ` · ${meta}` : ''}\n> ${(r.prompt || '').slice(0, 120)}`
+    // Post under the agent's own identity (webhook), so it reads as the agent talking.
     try {
-      await ch.send(head)
-      for (const part of chunks(r.output || '(no output captured)')) await ch.send(part)
+      await postAsAgent(ch, r.agent, `_${label}${meta ? ` · ${meta}` : ''}_\n> ${(r.prompt || '').slice(0, 120)}\n\n${r.output || '(no output captured)'}`)
     } catch {}
     await new Promise(res => setTimeout(res, 400))
   }
@@ -472,7 +512,8 @@ async function pollOps() {
         const ch = findChannelByName(guild, o.agent)
         if (ch) { const meta = (await api('/agents/meta') || []).find(m => m.name === o.agent); const cat = await ensureCategory(guild, meta?.group === 'web' ? CATEGORIES.web : CATEGORIES.core); await ch.setParent(cat.id) }
       } else if (o.op === 'say') {
-        const ch = findChannelByName(guild, o.channel)
+        let ch = findChannelByName(guild, o.channel)
+        if (!ch && o.ensure) { const cat = await ensureCategory(guild, CATEGORIES.cc); ch = (await ensureTextChannel(guild, slugify(o.channel), cat.id)).ch }
         if (ch) for (const part of chunks(o.text || '')) await ch.send(part)
       } else if (o.op === 'move') {
         const ch = findChannelByName(guild, o.channel)
@@ -513,6 +554,8 @@ const HELP = `**AI Command Center**
 \`!activity\` — feed in #activity-feed when agents log new memories (\`!activity stop\`)
 \`!mirror\` — post delegated run output into each agent's channel (\`!mirror stop\`)
 \`!money\` — create the #money channel for Jarvis's revenue updates
+\`!leads\` — create #leads + show the form-webhook URL for your sites
+\`!goals\` — show business goals · \`!goal add <text>\` to append one
 \`!gif <name|list>\` — post one of the agent reaction GIFs
 \`!archive <agent> [undo]\` — shelve/unshelve a project's channel
 \`!usage\` — usage / rate-limit status + spend today
@@ -677,10 +720,17 @@ client.on('messageCreate', async (msg) => {
       rest  = args
     }
 
-    const { model, effort, provider, rest: prompt } = parseRunFlags(rest, agent)
+    let { model, effort, provider, rest: prompt } = parseRunFlags(rest, agent)
+
+    // Long-prompt support: if a .txt/.md file is attached, append its contents.
+    // (Discord caps a typed message at 2000 chars — attach a file for big briefs.)
+    const att = msg.attachments?.find(a => /\.(txt|md|markdown)$/i.test(a.name || ''))
+    if (att) {
+      try { const r = await fetch(att.url); if (r.ok) prompt = `${prompt}\n\n${(await r.text())}`.trim() } catch {}
+    }
 
     if (!agent || !prompt) {
-      await msg.reply('Usage: `!run <agent> [-opus|-sonnet|-haiku|-codex] [--effort high] <prompt>`\nTip: run from an agent channel to skip the agent name.')
+      await msg.reply('Usage: `!run <agent> [-opus|-sonnet|-haiku|-codex] [--effort high] <prompt>`\nTip: run from an agent channel to skip the agent name. Attach a .txt for a long brief.')
       return
     }
 
@@ -694,38 +744,40 @@ client.on('messageCreate', async (msg) => {
     const short = `\`${prompt.slice(0, 60)}${prompt.length > 60 ? '…' : ''}\``
     const statusMsg = await msg.reply(`🤔 **${agent}**${tagS} thinking…${gif('thinking')}\n${short}`)
 
-    let elapsed = 0
-    let hasOutput = false
-    const progressInterval = setInterval(async () => {
-      elapsed += 30
-      const tick = hasOutput
-        ? `⌨️ **${agent}**${tagS} still working… (${elapsed}s)${gif('coding')}\n${short}`
-        : `⏳ **${agent}**${tagS} thinking… (${elapsed}s)${gif('thinking')}\n${short}`
-      await statusMsg.edit(tick).catch(() => {})
-    }, 30000)
+    let hasOutput = false, elapsed = 0
+    // Before any text arrives, tick a "thinking" timer so you know it's alive.
+    const thinkTimer = setInterval(async () => {
+      if (hasOutput) return
+      elapsed += 15
+      await statusMsg.edit(`⏳ **${agent}**${tagS} thinking… (${elapsed}s)${gif('thinking')}\n${short}`).catch(() => {})
+    }, 15000)
+
+    // Live stream: edit the message with the growing text as it generates.
+    const onProgress = (txt) => {
+      const tail = txt.length > 1600 ? '…' + txt.slice(-1600) : txt
+      statusMsg.edit(`⌨️ **${agent}**${tagS} writing…\n${tail}`).catch(() => {})
+    }
 
     try {
-      const { output, exitCode, cost, durationMs } = await runAgent(agent, prompt, cont, async () => {
-        hasOutput = true
-        // First output received — switch to coding GIF
-        await statusMsg.edit(`⌨️ **${agent}**${tagS} working…${gif('coding')}\n${short}`).catch(() => {})
-      }, { model, effort, provider })
+      const { output, exitCode, cost, durationMs } = await runAgent(agent, prompt, cont,
+        () => { hasOutput = true }, { model, effort, provider, onProgress })
 
-      clearInterval(progressInterval)
+      clearInterval(thinkTimer)
 
       const ok    = exitCode === 0
       const needsOk = /please approve|approval|waiting for (your|feedback|confirmation|input)|flagged|should i proceed|do you want me to|would you like me to|permission to|before i (make|write|edit|delete|remove|create)/i.test(output)
       const icon    = needsOk ? '⏸️' : ok ? '✅' : '⚠️'
-      const endGif  = needsOk ? gif('waiting') : ok ? gif('done') : gif('error')
+      const endGif  = endGifFor(output, ok, needsOk)
       const suffix  = needsOk ? '\n\n_Waiting for your approval — reply here or check the dashboard._' : ''
-      const meta    = [cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
+      const meta    = [provider === 'codex' && '🟢 codex', cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
       const metaS   = meta ? `  \`${meta}\`` : ''
-      // 1700-char chunks leave room for the header/GIF/suffix overhead (~300 chars) within Discord's 2000-char limit
       const parts   = chunks(output, 1700)
       await statusMsg.edit(`${icon} **${agent}**${tagS}${metaS} ›${endGif}\n${parts[0]}${parts.length === 1 ? suffix : ''}`)
       for (let i = 1; i < parts.length; i++) await msg.channel.send(parts[i] + (i === parts.length - 1 ? suffix : ''))
+      // Cheeky: react when the model drops an em dash.
+      if (/—/.test(output) && Math.random() < 0.5) await msg.channel.send(gif('emdash')).catch(() => {})
     } catch (e) {
-      clearInterval(progressInterval)
+      clearInterval(thinkTimer)
       await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`)
     }
     return
@@ -1035,6 +1087,36 @@ client.on('messageCreate', async (msg) => {
     return
   }
 
+  // ── !leads ───────────────────────────────────────────────────────────────────
+  // Creates #leads and shows the webhook URL to wire into website forms.
+  if (cmd === 'leads') {
+    const guild = msg.guild
+    if (!guild) { await msg.reply('❌ Must be used in a server.'); return }
+    try {
+      const cat = await ensureCategory(guild, CATEGORIES.cc)
+      const { ch } = await ensureTextChannel(guild, 'leads', cat.id, 'Website form submissions land here')
+      await msg.reply(`📥 Leads channel ready: <#${ch.id}>.\nWire your site forms to POST submissions to:\n\`${SERVER_URL}/webhook/form\`\n_(Netlify: Site → Forms → Notifications → Outgoing webhook. Exposes via your tunnel URL when public.)_`)
+    } catch (e) { await msg.reply(`❌ ${e.message}`) }
+    return
+  }
+
+  // ── !goals / !goal add <text> ────────────────────────────────────────────────
+  if (cmd === 'goals' || cmd === 'goal') {
+    try {
+      if (args[0] === 'add') {
+        const note = args.slice(1).join(' ').trim()
+        if (!note) { await msg.reply('Usage: `!goal add <text>`'); return }
+        const res = await fetch(`${SERVER_URL}/business/goals/append`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) })
+        await msg.reply(res.ok ? `✅ Added to goals: ${note}` : '❌ Could not add goal')
+        return
+      }
+      const g = await api('/business/goals')
+      if (!g?.content) { await msg.reply('No goals file yet. `!goal add <text>` to start one.'); return }
+      for (const part of chunks(g.content, 1900)) await msg.channel.send(part)
+    } catch (e) { await msg.reply(`❌ ${e.message}`) }
+    return
+  }
+
   // ── !archive <agent> [undo] ──────────────────────────────────────────────────
   // Shelve a project's channel into the Archive category (or move it back).
   if (cmd === 'archive') {
@@ -1124,7 +1206,7 @@ client.on('messageCreate', async (msg) => {
 
 client.once('ready', () => {
   console.log(`✅ Discord bot online as ${client.user.tag}`)
-  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, gif, archive, usage, manage, schedule, sync, status`)
+  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, leads, goals, gif, archive, usage, manage, schedule, sync, status`)
   startBoardLoop()    // resume the pinned status board if one was set before restart
   startActivityLoop() // resume the activity feed if one was set before restart
   startMirrorLoop()   // resume run mirroring if it was enabled before restart
