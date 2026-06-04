@@ -1162,6 +1162,19 @@ client.on('messageCreate', async (msg) => {
     return
   }
 
+  // ── !compact [agent] ───────────────────────────────────────────────────────
+  // Compacts the agent's Claude Code conversation to save context/tokens.
+  if (cmd === 'compact') {
+    const agent = args[0] || inferAgent(msg) || 'jarvis'
+    const statusMsg = await msg.reply(`🗜️ Compacting **${agent}** session…${gif('thinking')}`)
+    try {
+      const { output, exitCode, cost } = await runAgent(agent, '/compact', true)
+      const icon = exitCode === 0 ? '✅' : '⚠️'
+      await statusMsg.edit(`${icon} **${agent}** compacted${cost > 0 ? ` \`$${cost.toFixed(4)}\`` : ''}${gif('done')}\n${(output || '(done)').slice(0, 500)}`)
+    } catch (e) { await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`) }
+    return
+  }
+
   // ── !usage ─────────────────────────────────────────────────────────────────
   if (cmd === 'usage') {
     try {
@@ -1463,7 +1476,7 @@ client.on('messageCreate', async (msg) => {
 
 client.once('ready', () => {
   console.log(`✅ Discord bot online as ${client.user.tag}`)
-  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, runstop, btw, btwlist, btwclear, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, leads, goals, gif, archive, usage, manage, schedule, sync, status`)
+  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, runstop, btw, btwlist, btwclear, model, swarm, runs, new-agent, jarvislog, compact, todos, board, activity, mirror, money, leads, goals, gif, archive, usage, manage, schedule, sync, status`)
   startBoardLoop()    // resume the pinned status board if one was set before restart
   startActivityLoop() // resume the activity feed if one was set before restart
   startMirrorLoop()   // resume run mirroring if it was enabled before restart
