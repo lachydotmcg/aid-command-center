@@ -12,8 +12,23 @@ import { fileURLToPath } from 'url'
 
 const TOKEN      = process.env.DISCORD_TOKEN
 const SERVER_URL = 'http://localhost:3333'
+const ACC_TOKEN  = process.env.ACC_TOKEN || process.env.ACC_SECRET || null
+const MANAGER_PROVIDER = process.env.ACC_MANAGER_PROVIDER || 'claude'
 const PREFIX     = '!'
 const __dir      = path.dirname(fileURLToPath(import.meta.url))
+
+// Auto-attach the bearer token to every request we make to our own server,
+// so the bot keeps working once ACC auth is set (otherwise every call → 401).
+// Wraps global fetch once instead of editing ~30 scattered call sites.
+if (ACC_TOKEN) {
+  const _origFetch = globalThis.fetch
+  globalThis.fetch = (url, opts = {}) => {
+    if (typeof url === 'string' && url.startsWith(SERVER_URL)) {
+      opts = { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${ACC_TOKEN}` } }
+    }
+    return _origFetch(url, opts)
+  }
+}
 
 // Discord category names (emoji included). Agents are split by group.
 const CATEGORIES = {
@@ -60,6 +75,10 @@ const GIFS = {
   neutral:  'https://tenor.com/view/bowser-fart-gif-11437563165283047467',
   silly:    'https://tenor.com/view/kirk-speed-kirk-trying-not-to-laugh-speed-trying-not-to-laugh-charlie-kirk-gif-8859915067900253017',
   money:    'https://tenor.com/view/daniel-larson-money-10-dollars-excited-im-rich-gif-9240755225353990096',
+  swarm:    'https://tenor.com/view/solo-gif-15998098218309746585',
+  morning:  'https://tenor.com/view/jjk-jujutsu-kaisen-good-morning-morning-gojo-satoru-gif-14293349605449066576',
+  warning:  'https://tenor.com/view/nerd-code-geass-gif-7358851053127568855',
+  bigbrain: 'https://tenor.com/view/dr-stone-tsukasa-hyoga-senku-dr-stone-senku-gif-9910323225838612360',
   happy:    'https://tenor.com/view/anime-rimuru-tempest-リムル-テンペスト-gif-11181097571604475490',
 }
 const GIF_USES = {
@@ -73,12 +92,23 @@ const GIF_USES = {
   neutral: 'neutral',
   silly: 'Lachy made a mistake or is being silly',
   money: 'money',
+  swarm: 'delegating/swarm dispatch',
+  morning: 'good morning / daily briefing',
+  warning: 'urgent flag / heads up',
+  bigbrain: 'financial planning / usage calculation',
   happy: 'happy',
 }
 const GIF_ALIASES = {
   cash: 'money',
+  dispatch: 'swarm',
+  delegate: 'swarm',
   complete: 'done',
   completed: 'done',
+  alert: 'warning',
+  urgent: 'warning',
+  calculate: 'bigbrain',
+  brain: 'bigbrain',
+  finance: 'bigbrain',
   dash: 'emdash',
   em: 'emdash',
   emdash: 'emdash',
@@ -115,6 +145,24 @@ function endGifFor(output, ok, needsOk) {
 // ── Model / effort ──────────────────────────────────────────────────────────
 const VALID_MODELS  = ['opus', 'sonnet', 'haiku']
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+const PROVIDER_TAGS = {
+  codex: '🟢 codex',
+  gemini: '♊ gemini',
+  ollama: '🦙 ollama',
+  deepseek: '💙 deepseek',
+  groq: '⚡ groq',
+}
+const VALID_PROVIDERS = new Set(['claude', ...Object.keys(PROVIDER_TAGS)])
+const PROVIDER_LIST = [...VALID_PROVIDERS].join(', ')
+function providerTag(provider) { return PROVIDER_TAGS[provider] || '' }
+function providerName(provider) {
+  const p = String(provider || '').trim().toLowerCase()
+  return p ? p[0].toUpperCase() + p.slice(1) : 'Claude'
+}
+function validateProvider(provider) {
+  if (!provider || VALID_PROVIDERS.has(String(provider).trim().toLowerCase())) return
+  throw new Error(`unknown provider "${provider}". Valid providers: ${PROVIDER_LIST}`)
+}
 // Per-agent default model/effort, set with !model. Resets when the bot restarts.
 const agentDefaults = new Map() // agent -> { model, effort }
 
@@ -133,6 +181,10 @@ function parseRunFlags(words, agent) {
     if (!dashed) break
     const bare = lw.replace(/^--?/, '')
     if (bare === 'codex') { provider = 'codex'; continue }
+    if (bare === 'gemini') { provider = 'gemini'; continue }
+    if (bare === 'ollama') { provider = 'ollama'; continue }
+    if (bare === 'deepseek') { provider = 'deepseek'; continue }
+    if (bare === 'groq') { provider = 'groq'; continue }
     if (bare === 'claude') { provider = 'claude'; continue }
     if (VALID_MODELS.includes(bare)) { model = bare; continue }
     if ((lw === '--model' || lw === '-m') && words[i + 1]) { model = words[++i].toLowerCase(); continue }
@@ -140,8 +192,8 @@ function parseRunFlags(words, agent) {
     if (lw === '--provider' && words[i + 1]) { provider = words[++i].toLowerCase(); continue }
     break // unknown dashed token — treat as start of prompt
   }
-  // A Claude model alias is meaningless to Codex — drop it so we don't send "haiku" to GPT.
-  if (provider === 'codex' && VALID_MODELS.includes(model)) model = undefined
+  // Claude model aliases are meaningless to non-Claude providers — drop them.
+  if (provider && provider !== 'claude' && VALID_MODELS.includes(model)) model = undefined
   return { model, effort, provider, rest: words.slice(i).join(' ') }
 }
 
@@ -183,6 +235,29 @@ async function api(path) {
   return res.ok ? res.json() : null
 }
 
+async function apiRequest(path, options = {}) {
+  const res = await fetch(`${SERVER_URL}${path}`, options)
+  const raw = await res.text()
+  let data = {}
+  try { data = raw ? JSON.parse(raw) : {} } catch { data = raw ? { error: raw } : {} }
+  if (!res.ok) {
+    const err = new Error(data.error || `Server returned ${res.status}`)
+    err.status = res.status
+    err.data = data
+    throw err
+  }
+  return data
+}
+
+async function createManagerSchedule(body) {
+  validateProvider(body?.provider)
+  return apiRequest('/schedule', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'manager', ...body }),
+  })
+}
+
 // Streams the run SSE. Calls onWorking() the moment first text arrives so the
 // caller can switch the Discord message from "thinking" to "coding" GIF.
 async function runAgent(agent, prompt, continueSession = true, onWorking, opts = {}) {
@@ -191,10 +266,15 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agent, prompt, continueSession, model: opts.model, effort: opts.effort, provider: opts.provider }),
   })
-  if (!res.ok) throw new Error(`Server returned ${res.status}`)
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '')
+    let msg = `Server returned ${res.status}`
+    try { msg = JSON.parse(raw).error || msg } catch { if (raw.trim()) msg = raw.trim() }
+    throw new Error(msg)
+  }
   const reader = res.body.getReader()
   const dec    = new TextDecoder()
-  let buf = '', output = '', errorText = '', working = false, exitCode = 0, cost = 0, durationMs = null
+  let buf = '', output = '', errorText = '', working = false, runId = null, exitCode = 0, cost = 0, durationMs = null, providerTokens = 0
   let lastProg = 0
   while (true) {
     const { done, value } = await reader.read()
@@ -205,6 +285,7 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
       if (!line.startsWith('data: ')) continue
       try {
         const evt = JSON.parse(line.slice(6))
+        if (evt.runId) runId = evt.runId
         if (evt.text) {
           output += evt.text
           if (!working) { working = true; onWorking?.() }
@@ -214,13 +295,13 @@ async function runAgent(agent, prompt, continueSession = true, onWorking, opts =
           if (opts.onProgress && now - lastProg > 1800) { lastProg = now; opts.onProgress(output) }
         }
         if (evt.error) errorText += `${errorText ? '\n' : ''}${evt.error}`
-        if (evt.done) { exitCode = evt.code ?? 0; cost = evt.cost ?? 0; durationMs = evt.durationMs ?? null }
+        if (evt.done) { exitCode = evt.code ?? 0; cost = evt.cost ?? 0; durationMs = evt.durationMs ?? null; providerTokens = evt.providerTokens ?? 0 }
       } catch {}
     }
   }
   if (exitCode !== 0 && errorText.trim()) output += `\n\n[error]\n${errorText.trim().slice(-1200)}`
   output = limitDiscordOutput(output)
-  return { output: output.trim() || '(no output)', exitCode, cost, durationMs }
+  return { output: output.trim() || '(no output)', runId, exitCode, cost, durationMs, providerTokens }
 }
 
 function limitDiscordOutput(text, limit = 6000) {
@@ -234,6 +315,49 @@ function chunks(text, size = 1900) {
   const out = []
   while (text.length) { out.push(text.slice(0, size)); text = text.slice(size) }
   return out
+}
+
+function btwPrompt(messages) {
+  return [
+    'BTW messages queued while the previous run was active:',
+    '',
+    ...messages.map((m, i) => `${i + 1}. ${m}`),
+    '',
+    'Continue the previous session and act on these now.',
+  ].join('\n')
+}
+
+async function runBtwFollowUp(msg, agent, messages, opts = {}) {
+  const statusMsg = await msg.channel.send(`↪️ **${agent}** processing ${messages.length} BTW message${messages.length === 1 ? '' : 's'}...`)
+  const dispatchPromise = apiRequest('/dispatch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agent,
+      prompt: btwPrompt(messages),
+      continueSession: true,
+      model: opts.model,
+      effort: opts.effort,
+      provider: opts.provider,
+    }),
+  })
+
+  try { await apiRequest('/btw', { method: 'DELETE' }) } catch (e) {
+    await msg.channel.send(`⚠️ BTW follow-up started, but queue clear failed: ${e.message}`).catch(() => {})
+  }
+
+  try {
+    const d = await dispatchPromise
+    const ok = d.exitCode === 0
+    const meta = [providerTag(d.provider || opts.provider), d.providerTokens > 0 && `${d.providerTokens.toLocaleString()} tok`, d.cost > 0 && `$${d.cost.toFixed(4)}`, d.durationMs && `${(d.durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
+    const head = `${ok ? '✅' : '⚠️'} **${agent} BTW follow-up**${meta ? `  \`${meta}\`` : ''}\n`
+    const output = limitDiscordOutput(d.output || '(no output)')
+    const firstBudget = Math.max(200, 1990 - head.length)
+    await statusMsg.edit(head + output.slice(0, firstBudget))
+    for (const part of chunks(output.slice(firstBudget), 1900)) await msg.channel.send(part)
+  } catch (e) {
+    await statusMsg.edit(`❌ **${agent} BTW follow-up** — ${e.message}${gif('error')}`)
+  }
 }
 
 function statusEmoji(content) {
@@ -308,7 +432,7 @@ async function buildBoardContent() {
   out += groupBlock('🤖 Core Agents', core)
   out += groupBlock('🌐 Web Dev Clients', web)
   if (runs?.active?.length) {
-    out += '\n\n__⚙️ Working now__\n' + runs.active.map(r => `🟡 ${r.agent}${r.model ? ` 🧠${r.model}` : ''} — \`${(r.prompt || '').slice(0, 46)}\``).join('\n')
+    out += '\n\n__⚙️ Working now__\n' + runs.active.map(r => `🟡 ${r.agent}${providerTag(r.provider) ? ` ${providerTag(r.provider)}` : ''}${r.model ? ` 🧠${r.model}` : ''} — \`${(r.prompt || '').slice(0, 46)}\``).join('\n')
   }
   if (todos?.length) {
     out += '\n\n__⚠️ Outstanding__\n' + todos.slice(0, 8).map(t => {
@@ -469,11 +593,12 @@ async function pollMirror() {
     const ch = findAgentChannel(guild, r.agent)
     if (!ch) continue
     const parentName = r.parent && idToAgent[r.parent] ? idToAgent[r.parent] : (r.parent === 'swarm' || r.parent === 'discord-swarm' ? 'swarm' : null)
-    const meta = [r.provider === 'codex' && '🟢codex', r.model && `🧠${r.model}`, r.cost > 0 && `$${r.cost.toFixed(3)}`].filter(Boolean).join(' · ')
+    const meta = [providerTag(r.provider), r.model && `🧠${r.model}`, r.providerTokens > 0 && `${r.providerTokens.toLocaleString()} tok`, r.cost > 0 && `$${r.cost.toFixed(3)}`].filter(Boolean).join(' · ')
     const label = r.source === 'manager' ? '🧭 manager tick' : r.source === 'schedule' ? '⏰ scheduled' : r.source === 'lead' ? '📥 new lead triage' : `🔗 delegated${parentName ? ` by ${parentName}` : ''}`
+    const managerMention = r.source === 'manager' ? '\n\n<@428809680400154624>' : ''
     // Post under the agent's own identity (webhook), so it reads as the agent talking.
     try {
-      await postAsAgent(ch, r.agent, `_${label}${meta ? ` · ${meta}` : ''}_\n> ${(r.prompt || '').slice(0, 120)}\n\n${r.output || '(no output captured)'}`)
+      await postAsAgent(ch, r.agent, `_${label}${meta ? ` · ${meta}` : ''}_\n> ${(r.prompt || '').slice(0, 120)}\n\n${r.output || '(no output captured)'}${managerMention}`)
     } catch {}
     await new Promise(res => setTimeout(res, 400))
   }
@@ -543,10 +668,13 @@ const HELP = `**AI Command Center**
 \`!log [agent]\` — latest memory log
 \`!history [agent]\` — last conversation messages
 \`!run [agent] <prompt>\` — send a prompt (--continue by default)
-   _flags:_ \`-opus\`/\`-sonnet\`/\`-haiku\`, \`-codex\`, \`--effort high\`
+   _flags:_ \`-opus\`/\`-sonnet\`/\`-haiku\`, \`-codex\`, \`-gemini\`, \`-ollama\`, \`-deepseek\`, \`-groq\`, \`--effort high\`
 \`!model [agent] <model> [effort]\` — set default model/effort for an agent
 \`!swarm <a,b,c> <prompt>\` — run one prompt across several agents in parallel
 \`!runs\` — live registry: who's working now + cost today
+\`!runstop [id]\` — stop a running agent task (latest active run if no id)
+\`!btw <message>\` — queue a note for the next manager tick or follow-up run
+\`!btwlist\` / \`!btwclear\` — inspect or clear the BTW queue
 \`!new-agent <name> [dir]\` — scaffold a new agent (dir + CLAUDE.md + memory)
 \`!jarvislog [agent]\` — make an agent write its memory log (handover)
 \`!todos\` — outstanding flags + blockers across all agents
@@ -559,7 +687,11 @@ const HELP = `**AI Command Center**
 \`!gif <name|list>\` — post one of the agent reaction GIFs
 \`!archive <agent> [undo]\` — shelve/unshelve a project's channel
 \`!usage\` — usage / rate-limit status + spend today
-\`!manage [min]\` — Jarvis runs as a background manager every N min (\`!manage stop\`)
+\`!manage [--claude|--gemini|--codex|--ollama|--groq|--deepseek] 60\` — manager loop; omitted provider uses ACC_MANAGER_PROVIDER
+\`!manage ollama\` — tells manager to PREFER Ollama for worker tasks (manager itself still Claude/Codex)
+\`!manage codex\` — tells manager to PREFER Codex for worker tasks
+\`!manage help\` — show manager syntax
+\`!manage stop\` — stop the background manager loop
 \`!manage hours mon-fri 9-17\` — restrict manager ticks to active hours (e.g. \`mon-wed 7-17, thu 7-13\`)
 \`!schedule …\` — \`list\` · \`every <min> <agent> <prompt>\` · \`in <min> …\` · \`cancel <id>\`
 \`!sync\` — build 🤖 Core / 🌐 Web Dev categories + a channel per agent
@@ -567,6 +699,14 @@ const HELP = `**AI Command Center**
 \`!help\` — this message
 
 _In an agent channel, [agent] can be omitted. Running there auto-loads that agent's memory on first use._`
+
+const MANAGE_HELP = `**Jarvis manager**
+\`!manage 60\` — start manager loop using ACC_MANAGER_PROVIDER
+\`!manage --claude 60\` / \`!manage --gemini 60\` / \`!manage --codex 60\` / \`!manage --ollama 60\` / \`!manage --groq 60\` / \`!manage --deepseek 60\` — run manager ticks with that provider
+\`!manage ollama\` — prefer Ollama for worker tasks
+\`!manage codex\` — prefer Codex for worker tasks
+\`!manage hours mon-fri 9-17\` — restrict active hours
+\`!manage stop\` — stop the manager loop`
 
 client.on('messageCreate', async (msg) => {
   if (msg.author.bot) return
@@ -577,7 +717,9 @@ client.on('messageCreate', async (msg) => {
 
   // ── !help ────────────────────────────────────────────────────────────────
   if (cmd === 'help') {
-    await msg.reply(HELP)
+    const parts = chunks(HELP, 1900)
+    await msg.reply(parts.shift())
+    for (const part of parts) await msg.channel.send(part)
     return
   }
 
@@ -730,7 +872,7 @@ client.on('messageCreate', async (msg) => {
     }
 
     if (!agent || !prompt) {
-      await msg.reply('Usage: `!run <agent> [-opus|-sonnet|-haiku|-codex] [--effort high] <prompt>`\nTip: run from an agent channel to skip the agent name. Attach a .txt for a long brief.')
+      await msg.reply('Usage: `!run <agent> [-opus|-sonnet|-haiku|-codex|-gemini|-ollama|-deepseek|-groq] [--effort high] <prompt>`\nTip: run from an agent channel to skip the agent name. Attach a .txt for a long brief.')
       return
     }
 
@@ -739,17 +881,18 @@ client.on('messageCreate', async (msg) => {
     let cont = true
     try { const h = await api(`/history/${agent}`); if (!h?.messages?.length) cont = false } catch { cont = false }
 
-    const tag   = [provider === 'codex' && '🟢 codex', model && `🧠 ${model}`, effort && `⚡ ${effort}`, !cont && '🧠 memory'].filter(Boolean).join(' · ')
+    const tag   = [providerTag(provider), model && `🧠 ${model}`, effort && `⚡ ${effort}`, !cont && '🧠 memory'].filter(Boolean).join(' · ')
     const tagS  = tag ? ` (${tag})` : ''
     const short = `\`${prompt.slice(0, 60)}${prompt.length > 60 ? '…' : ''}\``
-    const statusMsg = await msg.reply(`🤔 **${agent}**${tagS} thinking…${gif('thinking')}\n${short}`)
+    await msg.channel.send(gif('thinking')).catch(() => {})
+    const statusMsg = await msg.reply(`🤔 **${agent}**${tagS} thinking…\n${short}`)
 
     let hasOutput = false, elapsed = 0
     // Before any text arrives, tick a "thinking" timer so you know it's alive.
     const thinkTimer = setInterval(async () => {
       if (hasOutput) return
       elapsed += 15
-      await statusMsg.edit(`⏳ **${agent}**${tagS} thinking… (${elapsed}s)${gif('thinking')}\n${short}`).catch(() => {})
+      await statusMsg.edit(`⏳ **${agent}**${tagS} thinking… (${elapsed}s)\n${short}`).catch(() => {})
     }, 15000)
 
     // Live stream: edit the message with the growing text as it generates.
@@ -759,7 +902,7 @@ client.on('messageCreate', async (msg) => {
     }
 
     try {
-      const { output, exitCode, cost, durationMs } = await runAgent(agent, prompt, cont,
+      const { output, exitCode, cost, durationMs, providerTokens } = await runAgent(agent, prompt, cont,
         () => { hasOutput = true }, { model, effort, provider, onProgress })
 
       clearInterval(thinkTimer)
@@ -769,22 +912,34 @@ client.on('messageCreate', async (msg) => {
       const icon    = needsOk ? '⏸️' : ok ? '✅' : '⚠️'
       const endGif  = endGifFor(output, ok, needsOk)
       const suffix  = needsOk ? '\n\n_Waiting for your approval — reply here or check the dashboard._' : ''
-      const meta    = [provider === 'codex' && '🟢 codex', cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
+      const meta    = [providerTag(provider), providerTokens > 0 && `${providerTokens.toLocaleString()} tok`, cost > 0 && `$${cost.toFixed(4)}`, durationMs && `${(durationMs / 1000).toFixed(1)}s`].filter(Boolean).join(' · ')
       const metaS   = meta ? `  \`${meta}\`` : ''
       // Header-aware split: size the first chunk to whatever's left under 2000 after
-      // the header/GIF, so the edited message can never exceed Discord's limit.
-      const head    = `${icon} **${agent}**${tagS}${metaS} ›${endGif}\n`
+      // the header, so the edited message can never exceed Discord's limit.
+      const head    = `${icon} **${agent}**${tagS}${metaS} ›\n`
       const firstBudget = Math.max(200, 1990 - head.length)
       const firstPart = output.slice(0, firstBudget)
       const rest = output.slice(firstPart.length)
       const restParts = chunks(rest, 1900)
       await statusMsg.edit(head + firstPart + (restParts.length === 0 ? suffix : ''))
+      if (endGif) await msg.channel.send(endGif).catch(() => {})
       for (let i = 0; i < restParts.length; i++) await msg.channel.send(restParts[i] + (i === restParts.length - 1 ? suffix : ''))
       // Cheeky: react when the model drops an em dash.
       if (/—/.test(output) && Math.random() < 0.5) await msg.channel.send(gif('emdash')).catch(() => {})
+
+      try {
+        const queuedBtw = await api('/btw')
+        const btwMessages = queuedBtw?.messages || []
+        if (btwMessages.length) await runBtwFollowUp(msg, agent, btwMessages, { model, effort, provider })
+      } catch (e) {
+        await msg.channel.send(`⚠️ Could not process BTW queue: ${e.message}`).catch(() => {})
+      }
     } catch (e) {
       clearInterval(thinkTimer)
-      await statusMsg.edit(`❌ **${agent}** — ${e.message}${gif('error')}`)
+      const detail = /terminated|body timeout|fetch failed/i.test(e.message || '')
+        ? `${e.message} (stream disconnected; check \`!runs\` because the worker may still be running)`
+        : e.message
+      await statusMsg.edit(`❌ **${agent}** — ${detail}${gif('error')}`)
     }
     return
   }
@@ -799,7 +954,7 @@ client.on('messageCreate', async (msg) => {
       const fmt = r => {
         const dot = r.status === 'running' ? '🟡' : r.status === 'waiting' ? '⏸️' : r.status === 'error' ? '🔴' : '🟢'
         const src = r.source === 'swarm' ? '🐝' : r.source === 'agent' ? '🔗' : '🖥'
-        const meta = [r.model && `🧠${r.model}`, r.cost > 0 && `$${r.cost.toFixed(3)}`,
+        const meta = [providerTag(r.provider), r.model && `🧠${r.model}`, r.providerTokens > 0 && `${r.providerTokens.toLocaleString()} tok`, r.cost > 0 && `$${r.cost.toFixed(3)}`,
           r.status === 'running' ? `${Math.round((Date.now() - r.startedAt) / 1000)}s` : (r.durationMs ? `${(r.durationMs / 1000).toFixed(1)}s` : '')].filter(Boolean).join(' ')
         return `${dot}${src} **${r.agent}** ${meta}\n   \`${(r.prompt || '').slice(0, 70)}\``
       }
@@ -809,6 +964,57 @@ client.on('messageCreate', async (msg) => {
       if (!active.length && !recent.length) out += '\n_No runs yet._'
       await msg.reply(out.slice(0, 1950))
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
+    return
+  }
+
+  // ── !runstop [id] ─────────────────────────────────────────────────────────
+  if (cmd === 'runstop') {
+    const id = args[0]
+    try {
+      const d = await apiRequest(id ? `/run/${encodeURIComponent(id)}/stop` : '/run/latest/stop', { method: 'POST' })
+      await msg.reply(`Stopped run ${d.id} (agent: ${d.agent})`)
+    } catch (e) {
+      if (e.data?.error === 'no active runs') {
+        await msg.reply('No runs currently active.')
+      } else if (e.data?.error === 'run already finished') {
+        await msg.reply(`Run already finished (${e.data.status}).`)
+      } else {
+        await msg.reply(e.message)
+      }
+    }
+    return
+  }
+
+  // ── !btw / !btwlist / !btwclear ───────────────────────────────────────────
+  if (cmd === 'btw') {
+    const message = args.join(' ').trim()
+    if (!message) { await msg.reply('Usage: `!btw <message>`'); return }
+    try {
+      const d = await apiRequest('/btw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      })
+      await msg.reply(`Queued BTW message (${d.queued} in queue).`)
+    } catch (e) { await msg.reply(e.message) }
+    return
+  }
+
+  if (cmd === 'btwclear') {
+    try {
+      const d = await apiRequest('/btw', { method: 'DELETE' })
+      await msg.reply(`Cleared ${d.cleared} BTW message${d.cleared === 1 ? '' : 's'}.`)
+    } catch (e) { await msg.reply(e.message) }
+    return
+  }
+
+  if (cmd === 'btwlist') {
+    try {
+      const d = await api('/btw')
+      const messages = d?.messages || []
+      if (!messages.length) { await msg.reply('BTW queue is empty.'); return }
+      await msg.reply(`**BTW queue**\n${messages.map((m, i) => `${i + 1}. ${m}`).join('\n')}`.slice(0, 1900))
+    } catch (e) { await msg.reply(e.message) }
     return
   }
 
@@ -971,8 +1177,28 @@ client.on('messageCreate', async (msg) => {
       }
       out += `\n🎯 Target ceiling: ${Math.round((u.target || 0.75) * 100)}%`
       out += `\n🟢 Codex today: ~${(u.codexTokensToday || 0).toLocaleString()} tokens`
+      out += `\n⚡ Groq today: ~${(u.groqTokensToday || 0).toLocaleString()} tokens`
+      out += `\n💙 DeepSeek today: ~${(u.deepseekTokensToday || 0).toLocaleString()} paid tokens`
       out += `\n💰 Claude spend today: $${(u.costToday || 0).toFixed(3)}${gif('money')}`
       await msg.reply(out)
+    } catch (e) { await msg.reply(`❌ ${e.message}`) }
+    return
+  }
+
+  // ── !gaming [on|off] ─────────────────────────────────────────────────────────
+  // Disables Ollama system-wide so the GPU is fully free for games.
+  // Manager ticks still run (on Claude) but won't route any tasks to Ollama.
+  if (cmd === 'gaming') {
+    try {
+      const on = args[0] === 'on' ? true : args[0] === 'off' ? false : undefined
+      const res = await fetch(`${SERVER_URL}/gaming`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(on !== undefined ? { on } : {}),
+      })
+      const d = await res.json()
+      await msg.reply(d.gamingMode
+        ? '🎮 **Gaming mode ON** — Ollama disabled, GPU is all yours. Manager falls back to non-local providers. `!gaming off` when done.'
+        : '🦙 **Gaming mode OFF** — Ollama re-enabled, manager will use local GPU again.')
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }
@@ -982,6 +1208,10 @@ client.on('messageCreate', async (msg) => {
   // usage and decides what to do (delegating as needed). Default 60 min.
   // !manage hours <spec> restricts ticks to active hours (e.g. mon-fri 9-17).
   if (cmd === 'manage') {
+    if (args[0] === 'help') {
+      await msg.reply(MANAGE_HELP)
+      return
+    }
     try {
       const existing = (await api('/schedule') || []).filter(t => t.type === 'manager')
       if (args[0] === 'stop') {
@@ -993,14 +1223,26 @@ client.on('messageCreate', async (msg) => {
         const on = args[1] !== 'off'
         const everyMin = existing[0]?.everyMin || 60
         const activeHours = existing[0]?.activeHours || undefined
+        const managerProvider = existing[0]?.provider || MANAGER_PROVIDER
+        validateProvider(managerProvider)
         for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
-        await fetch(`${SERVER_URL}/schedule`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'manager', everyMin, activeHours, preferCodex: on }),
-        })
+        await createManagerSchedule({ everyMin, activeHours, provider: managerProvider, preferCodex: on })
         await msg.reply(on
-          ? '🟢 **Manager now PREFERS Codex** for every worker task — Claude is reserved (only Jarvis\'s own thinking uses it). `!manage codex off` to revert.'
-          : '↩️ Manager back to auto: Claude until ~90%, then Codex.')
+          ? `🟢 **Manager now PREFERS Codex** for worker tasks — manager provider remains ${providerName(managerProvider)}. \`!manage codex off\` to revert.`
+          : `↩️ Manager back to auto: worker hierarchy Ollama→Groq→Gemini→Codex→DeepSeek→Claude; manager provider remains ${providerName(managerProvider)}.`)
+        return
+      }
+      if (args[0] === 'ollama') {
+        const on = args[1] !== 'off'
+        const everyMin = existing[0]?.everyMin || 60
+        const activeHours = existing[0]?.activeHours || undefined
+        const managerProvider = existing[0]?.provider || MANAGER_PROVIDER
+        validateProvider(managerProvider)
+        for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
+        await createManagerSchedule({ everyMin, activeHours, provider: managerProvider, preferOllama: on })
+        await msg.reply(on
+          ? `🦙 **Manager now PREFERS Ollama** for worker tasks — manager provider remains ${providerName(managerProvider)}. \`!manage ollama off\` to revert.`
+          : `↩️ Manager back to auto: worker hierarchy Ollama→Groq→Gemini→Codex→DeepSeek→Claude; manager provider remains ${providerName(managerProvider)}.`)
         return
       }
       if (args[0] === 'hours') {
@@ -1010,26 +1252,28 @@ client.on('messageCreate', async (msg) => {
         try { activeHours = parseActiveHours(spec) } catch (e) { await msg.reply(`❌ Invalid hours spec: ${e.message}\nExample: \`mon-fri 9-17\` or \`mon-wed 7-17, thu 7-13\``); return }
         const everyMin = existing[0]?.everyMin || 60
         const preferCodex = existing[0]?.preferCodex || false
+        const preferOllama = existing[0]?.preferOllama || false
+        const managerProvider = existing[0]?.provider || MANAGER_PROVIDER
+        validateProvider(managerProvider)
         for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' })
-        const res = await fetch(`${SERVER_URL}/schedule`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'manager', everyMin, activeHours, preferCodex }),
-        })
-        const d = await res.json()
+        await createManagerSchedule({ everyMin, activeHours, provider: managerProvider, preferCodex, preferOllama })
         const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
         const desc = activeHours.map(e => `${e.days.map(d => DAY_LABELS[d]).join('/')} ${e.start}:00–${e.end}:00`).join(', ')
-        await msg.reply(`🧭 **Jarvis manager hours set** — ticks every ${everyMin} min, active: ${desc}\n\`!manage stop\` to end · \`!manage [min]\` to restart without hour restrictions`)
+        const restartCmd = String(managerProvider).toLowerCase() === String(MANAGER_PROVIDER).toLowerCase() ? '!manage 60' : `!manage --${managerProvider} 60`
+        await msg.reply(`🧭 **Jarvis manager hours set** — ticks every ${everyMin} min, active: ${desc}; manager: ${providerName(managerProvider)}\n\`!manage stop\` to end · \`${restartCmd}\` to restart without hour restrictions`)
         return
       }
-      const everyMin = parseInt(args[0], 10) || 60
+      const { provider: managerProviderFlag, rest: intervalText } = parseRunFlags(args, null)
+      const managerProvider = managerProviderFlag || MANAGER_PROVIDER
+      const everyMin = parseInt(intervalText, 10) || 60
       const preferCodex = existing[0]?.preferCodex || false
+      const preferOllama = existing[0]?.preferOllama || false
+      validateProvider(managerProvider)
       for (const t of existing) await fetch(`${SERVER_URL}/schedule/${t.id}`, { method: 'DELETE' }) // replace
-      const res = await fetch(`${SERVER_URL}/schedule`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'manager', everyMin, preferCodex }),
-      })
-      const d = await res.json()
-      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels)${preferCodex ? ' · 🟢 Codex-preferred' : ''}. First tick in ${everyMin} min. \`!manage stop\` to end · \`!manage hours mon-fri 9-17\` · \`!manage codex\` to save Claude.\n_Make sure \`!mirror\` is on so you see what it does._`)
+      await createManagerSchedule({ everyMin, provider: managerProvider, preferCodex, preferOllama })
+      const workerPreferenceTag = preferOllama ? ' · 🦙 Ollama-preferred' : preferCodex ? ' · 🟢 Codex-preferred' : ''
+      const fallbackNote = String(managerProvider).toLowerCase() === 'claude' ? ' (Codex fallback if blocked)' : ''
+      await msg.reply(`🧭 **Jarvis manager loop ON** — every ${everyMin} min Jarvis reviews to-dos + usage and acts (mirrored to channels)${workerPreferenceTag}. Manager provider: ${providerName(managerProvider)}${fallbackNote}; worker tasks use Ollama→Groq→Gemini→Codex→DeepSeek→Claude unless overridden. First tick in ${everyMin} min. \`!manage stop\` to end · \`!manage help\` · \`!manage hours mon-fri 9-17\` · \`!manage ollama\` to prefer Ollama workers · \`!manage codex\` to prefer Codex workers.\n_Make sure \`!mirror\` is on so you see what it does._`)
     } catch (e) { await msg.reply(`❌ ${e.message}`) }
     return
   }
@@ -1163,6 +1407,13 @@ client.on('messageCreate', async (msg) => {
           const chName = agent.toLowerCase().replace(/[^a-z0-9-]/g, '-')
           const parent = (cats[group] || cats.core).id
 
+          // Skip channels already in Archive — don't pull them back out
+          const existingCh = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name === chName)
+          if (existingCh?.parent?.name?.toLowerCase().includes('archive')) {
+            results.push(`⏭️ ${agent}: archived, skipped`)
+            continue
+          }
+
           const [log, history] = await Promise.all([api(`/logs/${agent}`), api(`/history/${agent}`)])
           const emoji = statusEmoji(log?.content)
           const label = statusLabel(log?.content)
@@ -1212,7 +1463,7 @@ client.on('messageCreate', async (msg) => {
 
 client.once('ready', () => {
   console.log(`✅ Discord bot online as ${client.user.tag}`)
-  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, leads, goals, gif, archive, usage, manage, schedule, sync, status`)
+  console.log(`   Prefix: ${PREFIX}  |  Commands: help, agents, log, history, run, runstop, btw, btwlist, btwclear, model, swarm, runs, new-agent, jarvislog, todos, board, activity, mirror, money, leads, goals, gif, archive, usage, manage, schedule, sync, status`)
   startBoardLoop()    // resume the pinned status board if one was set before restart
   startActivityLoop() // resume the activity feed if one was set before restart
   startMirrorLoop()   // resume run mirroring if it was enabled before restart

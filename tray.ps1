@@ -16,9 +16,16 @@ function Test-AccRunning {
     Where-Object { $_.CommandLine -match 'server\.js|discord-bot\.js' })
 }
 function Stop-Acc {
+  # Kill node processes (server + bot)
   Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match 'server\.js|discord-bot\.js' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  # Kill ngrok
+  Get-Process -Name ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  # Close the cmd windows we opened (by title) — prevents duplicates on restart
+  Get-Process -Name cmd -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -match 'ACC Server|ACC Discord Bot|ngrok' } |
+    ForEach-Object { $_.Kill() }
 }
 function Start-Acc {
   # Use start.bat — the proven launcher (server + bot + opens the dashboard).

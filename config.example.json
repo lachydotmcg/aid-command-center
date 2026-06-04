@@ -1,14 +1,18 @@
 {
-  "_comment": "Copy to config.json to override defaults. Every field is optional. Environment variables (ACC_PORT, ACC_MEMORY_ROOT, ACC_SECRET, ACC_CLAUDE_EXE) take precedence over this file. config.json is gitignored.",
+  "_comment": "Copy to config.json to override defaults. Every field is optional. Environment variables take precedence over this file. config.json is gitignored.",
 
   "port": 3333,
 
   "memoryRoot": "C:\\Users\\you\\Documents\\agent-memory",
 
   "secret": "",
+  "token": "",
 
   "claudeExe": "",
   "codexExe": "",
+  "geminiExe": "",
+  "geminiApiKey": "",
+  "geminiModel": "gemini-2.0-flash",
   "codexSandbox": "workspace-write",
   "codexDiskFullRead": true,
   "codexAddDirs": [

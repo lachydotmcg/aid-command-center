@@ -52,17 +52,240 @@ function cmdQuote(value) {
   return /[\s&()^|<>"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s
 }
 
+const CODE_EDITOR_SYSTEM_PROMPT = 'You are a precise code editor. When given file contents and a task, return only the complete modified file. Do not explain. Do not add markdown fences unless the file itself is markdown.'
+const FILE_PATTERN = /\b([\w./-]+\.(?:html|css|js|mjs|ts|tsx|jsx|json|py|md|sh|txt|env\.example|config\.[a-z]+))\b/g
+const AUTO_INJECT_EXTS = new Set(['.html', '.css', '.js', '.mjs', '.json', '.md', '.ts', '.tsx', '.py'])
+const AUTO_INJECT_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build'])
+const AUTO_INJECT_MAX_FILE_BYTES = 6 * 1024
+const AUTO_INJECT_MAX_CHARS = 24000
+
+function mentionedFiles(prompt) {
+  return [...new Set([...String(prompt || '').matchAll(FILE_PATTERN)].map(m => m[1]))]
+}
+
+function projectFilePath(cwd, rel) {
+  if (!cwd) return null
+  const base = path.resolve(cwd)
+  const full = path.resolve(cwd, rel)
+  const baseCmp = process.platform === 'win32' ? base.toLowerCase() : base
+  const fullCmp = process.platform === 'win32' ? full.toLowerCase() : full
+  return (fullCmp === baseCmp || fullCmp.startsWith(baseCmp + path.sep)) ? full : null
+}
+
+function directoryListing(cwd) {
+  try {
+    return fs.readdirSync(cwd, { withFileTypes: true })
+      .map(e => e.name)
+      .sort((a, b) => a.localeCompare(b))
+  } catch {
+    return []
+  }
+}
+
+function autoInjectPriority(rel) {
+  const name = path.basename(rel).toLowerCase()
+  const ext = path.extname(name)
+  if (name === 'index.html') return 0
+  if (ext === '.html') return 1
+  if (ext === '.js' || ext === '.mjs' || ext === '.ts' || ext === '.tsx') return 2
+  if (ext === '.css') return 3
+  if (ext === '.json') return 4
+  if (ext === '.md') return 5
+  return 6
+}
+
+function collectAutoInjectFiles(cwd) {
+  const base = path.resolve(cwd)
+  const candidates = []
+
+  function walk(dir) {
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    entries.sort((a, b) => a.name.localeCompare(b.name))
+
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (AUTO_INJECT_SKIP_DIRS.has(entry.name.toLowerCase())) continue
+        walk(full)
+        continue
+      }
+      if (!entry.isFile()) continue
+
+      const ext = path.extname(entry.name).toLowerCase()
+      if (!AUTO_INJECT_EXTS.has(ext)) continue
+      try {
+        const stat = fs.statSync(full)
+        if (stat.size >= AUTO_INJECT_MAX_FILE_BYTES) continue
+        candidates.push({
+          full,
+          rel: path.relative(base, full).replace(/\\/g, '/'),
+        })
+      } catch {}
+    }
+  }
+
+  walk(base)
+
+  candidates.sort((a, b) =>
+    autoInjectPriority(a.rel) - autoInjectPriority(b.rel) ||
+    a.rel.localeCompare(b.rel))
+
+  const files = []
+  let totalChars = 0
+  let omitted = 0
+  for (const candidate of candidates) {
+    let content = ''
+    try { content = fs.readFileSync(candidate.full, 'utf8') } catch { omitted++; continue }
+    if (totalChars + content.length > AUTO_INJECT_MAX_CHARS) { omitted++; continue }
+    totalChars += content.length
+    files.push({ rel: candidate.rel, content })
+  }
+
+  return { files, omitted }
+}
+
+function autoProjectContext(cwd, agent = 'unknown') {
+  const directory = path.resolve(cwd)
+  const listing = directoryListing(directory)
+  const { files, omitted } = collectAutoInjectFiles(directory)
+  const fileList = listing.length ? listing.join('\n') : '(directory listing unavailable)'
+  const fileContents = files.length
+    ? files.map(f => `=== FILE: ${f.rel} ===\n${f.content}\n=== END: ${f.rel} ===`).join('\n\n')
+    : '(no eligible files under 6KB found)'
+  const omittedNote = omitted
+    ? `\n\n... [${omitted} eligible file${omitted === 1 ? '' : 's'} omitted due to ${AUTO_INJECT_MAX_CHARS} char cap]`
+    : ''
+
+  return `=== PROJECT CONTEXT (auto-injected): ${agent || 'unknown'} ===\nDirectory: ${directory}\n${fileList}\n\n${fileContents}${omittedNote}\n=== END PROJECT CONTEXT ===`
+}
+
+function injectFiles(prompt, cwd, referencePrompt = prompt, agent = 'unknown') {
+  if (!cwd) return prompt
+  const mentioned = mentionedFiles(referencePrompt)
+
+  const injected = []
+  for (const rel of mentioned) {
+    const full = projectFilePath(cwd, rel)
+    if (!full) continue
+    try {
+      const content = fs.readFileSync(full, 'utf8')
+      const capped = content.length > 8000 ? content.slice(0, 8000) + '\n... [truncated]' : content
+      injected.push(`=== FILE: ${rel} ===\n${capped}\n=== END: ${rel} ===`)
+    } catch {}
+  }
+
+  const editInstructions = `To edit an existing file use EDIT blocks (safe — only replaces the matched section):
+=== EDIT: path/to/file ===
+<<<< SEARCH
+exact existing lines to find
+====
+replacement lines
+>>>> REPLACE
+To create a new file (or fully replace a small one <80 lines) use:
+=== WRITE: path/to/file ===
+full file content here`
+
+  if (mentioned.length) {
+    if (!injected.length) return prompt
+    return `${injected.join('\n\n')}\n\n---\n\nTASK:\n${prompt}\n\n${editInstructions}`
+  }
+
+  return `${autoProjectContext(cwd, agent)}\n\n---\n\nTASK:\n${prompt}\n\n${editInstructions}`
+}
+
+function stripOuterFence(output) {
+  const text = String(output || '').trim()
+  const match = text.match(/^```(?:[\w.-]+)?\n([\s\S]*?)\n```$/)
+  return match ? match[1].trim() : text
+}
+
+function looksLikeFileContent(output) {
+  const text = stripOuterFence(output)
+  if (!text) return false
+  if (/^(sure|here(?:'s| is)|below is|the modified|i (?:can|will|have)\b|of course)\b/i.test(text)) return false
+  return /[{};<>]/.test(text) ||
+    /^(import|export|const|let|var|function|class|def |from |#!|#{1,6}\s|[A-Z][A-Z0-9_]*=|<!doctype|<html|{\s*["[])/i.test(text)
+}
+
+const REST_PROVIDERS = new Set(['ollama', 'deepseek', 'groq'])
+const MAX_WRITE_LINES = 150 // Full WRITE blocks for REST providers capped at this size
+
+// Safe diff-based edits: find exact SEARCH text, replace with REPLACE text.
+// No line-count limit — targeted edits can't truncate a file.
+function applyFileEdits(output, cwd, provider = 'claude') {
+  if (!cwd) return false
+  const editPattern = /=== EDIT: ([\w./.\\-]+) ===\s*\n<<<< SEARCH\n([\s\S]*?)\n====\n([\s\S]*?)\n>>>> REPLACE/g
+  let matched = false
+  for (const m of output.matchAll(editPattern)) {
+    const relPath = m[1].trim()
+    const search  = m[2]
+    const replace = m[3]
+    const filePath = projectFilePath(cwd, relPath)
+    if (!filePath) { console.warn(`[file-edit] rejected path: ${relPath}`); continue }
+    let original
+    try { original = fs.readFileSync(filePath, 'utf8') } catch {
+      console.warn(`[file-edit] file not found: ${filePath}`); continue
+    }
+    if (!original.includes(search)) {
+      console.warn(`[file-edit] SEARCH block not found in ${relPath} — edit skipped (safe)`)
+      continue
+    }
+    const updated = original.replace(search, replace)
+    fs.writeFileSync(filePath, updated, 'utf8')
+    console.log(`[file-edit] patched ${relPath} (provider=${provider})`)
+    matched = true
+  }
+  return matched
+}
+
+function applyFileWrites(output, cwd, prompt = '', provider = 'claude') {
+  if (!cwd) return false
+  const isRestProvider = REST_PROVIDERS.has(provider)
+  // Apply safe EDIT blocks first (no size limit — search/replace can't truncate)
+  const editMatched = applyFileEdits(output, cwd, provider)
+  const writePattern = /=== WRITE: ([\w./.\\-]+) ===\n([\s\S]*?)(?==== WRITE:|=== EDIT:|$)/g
+  let matched = editMatched
+  for (const m of output.matchAll(writePattern)) {
+    const content = stripOuterFence(m[2])
+    const lineCount = content.split('\n').length
+    if (isRestProvider && lineCount > MAX_WRITE_LINES) {
+      console.warn(`[file-inject] blocked WRITE to ${m[1]}: ${lineCount} lines exceeds REST limit of ${MAX_WRITE_LINES}. Use EDIT blocks for large files.`)
+      continue
+    }
+    const filePath = projectFilePath(cwd, m[1])
+    if (!filePath) continue
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    fs.writeFileSync(filePath, content, 'utf8')
+    console.log(`[file-inject] wrote ${m[1]} (${lineCount} lines, provider=${provider})`)
+    matched = true
+  }
+  // Auto-inference write-back disabled: too risky — REST providers return partial files
+  // and overwrite everything. Only explicit === WRITE: === or === EDIT: === markers honoured.
+  return matched
+}
+
 const PORT        = Number(pick('ACC_PORT', 'port', 3333))
 const MEMORY_ROOT = pick('ACC_MEMORY_ROOT', 'memoryRoot',
   'C:\\Users\\nirke\\OneDrive\\Documents\\Obsidian\\Lachy\\agent-memory')
+const OBSIDIAN_ROOT = path.dirname(MEMORY_ROOT)
+const BUSINESS_DIR = path.join(OBSIDIAN_ROOT, 'business')
+const GOALS_FILE = path.join(BUSINESS_DIR, 'goals.md')
+const JARVIS_MEMORY_DIR = path.join(MEMORY_ROOT, 'jarvis')
+const AGENT_CLI_PATH = path.join(__dir, 'agent-cli.mjs')
 const ACC_SECRET  = pick('ACC_SECRET', 'secret', null) || null
+const ACC_TOKEN   = pick('ACC_TOKEN', 'token', ACC_SECRET) || null
+const AUTH_TOKENS = new Set([ACC_SECRET, ACC_TOKEN].map(v => String(v || '').trim()).filter(Boolean))
 // Default parent directory for agents scaffolded via POST /new-agent.
 const NEW_AGENT_BASE = pick('ACC_NEW_AGENT_BASE', 'newAgentBase',
   'C:\\Users\\nirke\\OneDrive\\Documents\\Lachys Web Dev')
 // Website form webhook: optional shared key (?key=) to stop random internet POSTs
 // from triggering agent runs, and which provider triages each lead.
 const FORM_KEY = pick('ACC_FORM_KEY', 'formKey', null) || null
-const LEAD_PROVIDER = pick('ACC_LEAD_PROVIDER', 'leadProvider', 'claude') // claude can also write money-log.md
+const LEAD_PROVIDER    = pick('ACC_LEAD_PROVIDER', 'leadProvider', 'claude') // claude can also write money-log.md
+// Manager provider: set ACC_MANAGER_PROVIDER=ollama to run manager ticks locally (free, always on).
+// Falls back to 'claude' if unset. Set to 'deepseek' for cheap API manager ticks.
+const MANAGER_PROVIDER = pick('ACC_MANAGER_PROVIDER', 'managerProvider', 'claude')
 
 // claude.exe is bundled with the Claude desktop app — not on system PATH.
 // Find the latest installed version dynamically (Windows default), or honour an
@@ -97,6 +320,42 @@ function findCodex() {
   return 'codex'
 }
 const CODEX_EXE = findCodex()
+
+// Gemini CLI — free API access via the gemini CLI tool. Not typically in the
+// global npm bin on this machine, so we fall back to npx @google/gemini-cli.
+// Override with ACC_GEMINI_EXE or config.json "geminiExe".
+function findGemini() {
+  const override = process.env.ACC_GEMINI_EXE ?? fileCfg.geminiExe
+  if (override) { console.log(`  gemini  →  ${override} (override)`); return override }
+  const candidates = [
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'gemini.cmd'),
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'gemini'),
+  ]
+  for (const c of candidates) { if (fs.existsSync(c)) { console.log(`  gemini  →  ${c}`); return c } }
+  console.log('  gemini  →  npx @google/gemini-cli (not globally installed)')
+  return null // signals to use npx at runtime
+}
+const GEMINI_EXE   = findGemini()
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.ACC_GEMINI_API_KEY ?? fileCfg.geminiApiKey ?? null
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? process.env.ACC_GEMINI_MODEL ?? fileCfg.geminiModel ?? 'gemini-2.0-flash'
+
+// Ollama — local model runner. Free, private, uses the local GPU (3060).
+const OLLAMA_BASE_URL   = process.env.ACC_OLLAMA_BASE_URL  ?? fileCfg.ollamaBaseUrl  ?? 'http://localhost:11434'
+const OLLAMA_MODEL      = process.env.ACC_OLLAMA_MODEL     ?? fileCfg.ollamaModel    ?? 'qwen3:8b'
+const OLLAMA_KEEP_ALIVE = process.env.ACC_OLLAMA_KEEP_ALIVE ?? fileCfg.ollamaKeepAlive ?? '5m'
+const OLLAMA_TIMEOUT_MS = Number(process.env.ACC_OLLAMA_TIMEOUT_MS ?? fileCfg.ollamaTimeoutMs ?? 120000)
+
+// DeepSeek — OpenAI-compatible REST API. Cheap paid coding model by default.
+const DEEPSEEK_API_KEY    = process.env.ACC_DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? fileCfg.deepseekApiKey ?? null
+const DEEPSEEK_BASE_URL   = process.env.ACC_DEEPSEEK_BASE_URL ?? process.env.DEEPSEEK_BASE_URL ?? fileCfg.deepseekBaseUrl ?? 'https://api.deepseek.com'
+const DEEPSEEK_MODEL      = process.env.ACC_DEEPSEEK_MODEL ?? process.env.DEEPSEEK_MODEL ?? fileCfg.deepseekModel ?? 'deepseek-chat'
+const DEEPSEEK_TIMEOUT_MS = Number(process.env.ACC_DEEPSEEK_TIMEOUT_MS ?? fileCfg.deepseekTimeoutMs ?? 60000)
+
+// Groq — OpenAI-compatible REST API. Free-tier, low-latency worker provider.
+const GROQ_API_KEY    = process.env.ACC_GROQ_API_KEY ?? process.env.GROQ_API_KEY ?? fileCfg.groqApiKey ?? null
+const GROQ_BASE_URL   = process.env.ACC_GROQ_BASE_URL ?? process.env.GROQ_BASE_URL ?? fileCfg.groqBaseUrl ?? 'https://api.groq.com/openai/v1'
+const GROQ_MODEL      = process.env.ACC_GROQ_MODEL ?? process.env.GROQ_MODEL ?? fileCfg.groqModel ?? 'llama-3.3-70b-versatile'
+const GROQ_TIMEOUT_MS = Number(process.env.ACC_GROQ_TIMEOUT_MS ?? fileCfg.groqTimeoutMs ?? 30000)
 
 // Agent name → project directory (where `claude --print` runs).
 // Defaults match the original setup; override or extend via config.json "agents".
@@ -133,6 +392,19 @@ function latestLog(agent) {
   } catch { return null }
 }
 
+function readBriefingFile(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf8').trimEnd()
+    return content || '(empty file)'
+  } catch (e) {
+    return `(Unable to read ${filePath}: ${e.message})`
+  }
+}
+
+function lastLines(content, count) {
+  return String(content || '').split(/\r?\n/).slice(-count).join('\n').trimEnd() || '(empty file)'
+}
+
 function agentCwd(name) {
   return AGENT_DIRS[name] || path.join(MEMORY_ROOT, name)
 }
@@ -141,36 +413,41 @@ function agentCwd(name) {
 app.use(express.json())
 app.use((_, res, next) => { res.setHeader('Access-Control-Allow-Origin', '*'); next() })
 
-// Optional bearer-token auth. When ACC_SECRET is unset the server is wide open
-// (intended for localhost-only use). When set, every API route except the
-// static page and /status requires the token via either:
-//   Authorization: Bearer <secret>   or   ?token=<secret>
+// Optional bearer-token auth. When neither ACC_SECRET nor ACC_TOKEN is set the
+// server is wide open (intended for localhost-only use). When either is set,
+// API routes require one of the configured tokens via:
+//   Authorization: Bearer <token>   or   X-ACC-Token: <token>   or   ?token=<token>
 function authOk(req) {
-  if (!ACC_SECRET) return true
+  if (!AUTH_TOKENS.size) return true
   const header = req.get('authorization') || ''
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : null
-  const token = bearer || req.query.token
-  return token === ACC_SECRET
+  const tokens = [bearer, req.get('x-acc-token'), req.query.token]
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+  return tokens.some(token => AUTH_TOKENS.has(token))
 }
 const requireAuth = (req, res, next) =>
-  authOk(req) ? next() : res.status(401).json({ error: 'Unauthorized — token required' })
+  authOk(req) ? next() : res.status(401).json({ error: 'Unauthorized - token required' })
 
 // Serve ONLY the UI page (not the whole directory) so source, package.json, and
-// config.json — which may hold the ACC_SECRET — are never downloadable. The page
-// and health check stay open so the UI can load and prompt for a token.
+// config.json - which may hold secrets - are never downloadable. The page stays
+// open so the UI can load and prompt for a token; API routes below require auth.
 app.get(['/', '/index.html'], (_, res) => res.sendFile(path.join(__dir, 'index.html')))
-app.get('/status', (_, res) =>
-  res.json({ ok: true, time: new Date().toISOString(), authRequired: !!ACC_SECRET }))
+app.get('/status', requireAuth, (_, res) =>
+  res.json({ ok: true, time: new Date().toISOString(), authRequired: AUTH_TOKENS.size > 0 }))
 
 // POST /webhook/form — public endpoint for website form submissions (e.g. Netlify
-// form notifications). Auth-exempt so external sites can POST. Drops a message
-// into the Discord #leads channel via the ops queue. Handles Netlify's
-// { payload: { data, form_name, site_url } } shape and plain JSON.
+// form notifications). External sites can use ACC_FORM_KEY; internal callers can
+// use the normal ACC token. Drops a message into the Discord #leads channel via
+// the ops queue. Handles Netlify's { payload: { data, form_name, site_url } }
+// shape and plain JSON.
 app.post('/webhook/form', (req, res) => {
   try {
-    // If a key is configured, require it — stops random internet POSTs from
-    // spawning agent runs. Without a key, triage stays off unless explicitly on.
-    if (FORM_KEY && req.query.key !== FORM_KEY) return res.status(401).json({ error: 'bad or missing key' })
+    // If a key is configured, accept it for website posts. Otherwise fall back
+    // to ACC auth when configured. Without either, local zero-config remains open
+    // but triage stays off unless explicitly enabled.
+    if (FORM_KEY && req.query.key !== FORM_KEY && !authOk(req)) return res.status(401).json({ error: 'bad or missing key/token' })
+    if (!FORM_KEY && !authOk(req)) return res.status(401).json({ error: 'Unauthorized - token required' })
     const p = req.body?.payload || req.body || {}
     const data = p.data || p
     const formName = p.form_name || data._form || data._formName || 'form'
@@ -188,7 +465,7 @@ app.post('/webhook/form', (req, res) => {
     const triageOn = FORM_KEY ? true : (pick('ACC_LEAD_TRIAGE', 'leadTriage', '0') === '1')
     if (triageOn) {
       const prompt = `A new website lead just arrived via the "${formName}" form${site ? ` on ${site}` : ''}:\n\n${lines.join('\n')}\n\nTriage this lead: (1) add a row to the pipeline table in business/money-log.md, (2) draft a short, friendly reply email Lachy can send, (3) give a one-line recommended next step (and a good time to follow up). Be concise.`
-      const prov = LEAD_PROVIDER === 'codex' ? 'codex' : 'claude'
+      const prov = normalizeProvider(LEAD_PROVIDER)
       const run = newRun({ agent: 'jarvis', prompt: `[lead] ${formName}`, source: 'lead', provider: prov, model: prov === 'claude' ? 'haiku' : null })
       dispatchRun({ run, cwd: agentCwd('jarvis'), prompt, fullPrompt: prompt, continueSession: false, model: run.model, delegate: false }) // fire-and-forget
     }
@@ -196,7 +473,7 @@ app.post('/webhook/form', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }) }
 })
 
-// Everything below requires auth (no-op when ACC_SECRET is unset).
+// Everything below requires auth (no-op when no ACC token is configured).
 app.use(requireAuth)
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -289,8 +566,10 @@ app.post('/new-agent', (req, res) => {
 })
 
 // Classify an agent as a web-dev client (lives under NEW_AGENT_BASE) or 'core'.
-function agentGroup(dir) {
+const CORE_OVERRIDES = new Set(['liftoff', 'muja-products', 'etsy-agent', 'marketing-agent'])
+function agentGroup(dir, name) {
   if (!dir) return 'core'
+  if (name && CORE_OVERRIDES.has(name)) return 'core'
   const base = path.resolve(NEW_AGENT_BASE).toLowerCase()
   return path.resolve(dir).toLowerCase().startsWith(base) ? 'web' : 'core'
 }
@@ -308,7 +587,7 @@ app.get('/agents/meta', (_, res) => {
   res.json(all.map(name => ({
     name,
     dir: agentCwd(name),
-    group: (name in AGENT_DIRS) ? agentGroup(AGENT_DIRS[name]) : 'core',
+    group: (name in AGENT_DIRS) ? agentGroup(AGENT_DIRS[name], name) : 'core',
   })))
 })
 
@@ -342,7 +621,6 @@ app.get('/logs/:agent', (req, res) => {
 })
 
 // Business files (goals + money log) live next to the memory root.
-const BUSINESS_DIR = path.join(path.dirname(MEMORY_ROOT), 'business')
 app.get('/business/:file', (req, res) => {
   const allowed = { goals: 'goals.md', money: 'money-log.md' }
   const name = allowed[req.params.file]
@@ -394,7 +672,7 @@ function delegationPrompt() {
   const cli = path.join(__dir, 'agent-cli.mjs').replace(/\\/g, '/')
   return [
     'TEAMWORK: You can delegate independent sub-tasks to other specialist agents to get more done in parallel. Run this from the Bash tool:',
-    `  node "${cli}" run <agent> "<prompt>" [--model haiku|sonnet|opus]   # one sub-agent, returns its output`,
+    `  node "${cli}" run <agent> "<prompt>" [--model haiku|sonnet|opus] [--codex] [--gemini] [--ollama] [--deepseek] [--groq]   # one sub-agent, returns its output`,
     `  node "${cli}" swarm '[{"agent":"<a>","prompt":"..."},{"agent":"<b>","prompt":"..."}]'   # many in parallel`,
     `Available agents: ${agents}.`,
     'Each sub-agent runs in its own project directory. Only delegate genuinely independent work — do small things yourself. Prefer haiku for cheap sub-tasks. When you delegate, first tell the user how many sub-agents you are launching and what each is doing, then summarise their results when they return.',
@@ -413,11 +691,31 @@ function buildArgs({ continueSession, model, effort, prompt, fullPrompt, delegat
   return continueSession ? ['--continue', ...base, prompt] : [...base, fullPrompt]
 }
 
+const VALID_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'ollama', 'deepseek', 'groq'])
+const PROVIDER_LIST = [...VALID_PROVIDERS].join(', ')
+
+function normalizeProvider(p) {
+  const raw = String(p ?? '').trim()
+  if (!raw) return 'claude'
+  const provider = raw.toLowerCase()
+  if (VALID_PROVIDERS.has(provider)) return provider
+  const err = new Error(`unknown provider "${raw}". Valid providers: ${PROVIDER_LIST}`)
+  err.status = 400
+  throw err
+}
+
+function providerError(res, err) {
+  return res.status(err.status || 400).json({ error: err.message })
+}
+
 // ── Run registry ────────────────────────────────────────────────────────────
 // Every spawn (dashboard, agent-to-agent dispatch, swarm) is tracked here so the
 // dashboard/Discord can show a live count, cost, and parent/child relationships.
 let runSeq = 0
 const runs = new Map() // id -> run
+const btwQueue = [] // { message, queuedAt }
+// Gaming mode: when true, Ollama is skipped (GPU reserved for games) and tasks fall back to non-local providers.
+let gamingMode = false
 const MAX_RUNS = 250
 // Latest rate-limit snapshot, captured free from every run's stream. Lets Jarvis
 // and the dashboard see how close we are to the usage cap / whether we're out.
@@ -429,9 +727,9 @@ function newRun({ agent, prompt, model, effort, parent = null, source = 'dashboa
   const run = {
     id, agent: agent || '(unknown)', provider, model: model || null, effort: effort || null,
     prompt: (prompt || '').slice(0, 200), parent, source,
-    status: 'running', startedAt: Date.now(), endedAt: null,
+    status: 'running', startedAt: Date.now(), endedAt: null, finishedAt: null,
     cost: 0, usage: null, durationMs: null, numTurns: null, exitCode: null,
-    codexTokens: 0, output: '', pid: null, needsAction: '', _proc: null,
+    codexTokens: 0, providerTokens: 0, output: '', pid: null, needsAction: '', _proc: null,
   }
   runs.set(id, run)
   if (runs.size > MAX_RUNS) {
@@ -440,11 +738,53 @@ function newRun({ agent, prompt, model, effort, parent = null, source = 'dashboa
   }
   return run
 }
-function finishRun(run, patch) { Object.assign(run, patch); run.endedAt = Date.now(); run._proc = null }
+function finishRun(run, patch) {
+  if (run.status === 'cancelled' && patch.status !== 'cancelled') {
+    if (run.exitCode == null && patch.exitCode != null) run.exitCode = patch.exitCode
+    if (run.durationMs == null && patch.durationMs != null) run.durationMs = patch.durationMs
+    if (!run.output && patch.output) run.output = patch.output
+    run.endedAt = run.endedAt || run.finishedAt || Date.now()
+    run.finishedAt = run.finishedAt || run.endedAt
+    run._proc = null
+    return
+  }
+  Object.assign(run, patch)
+  run.endedAt = Date.now()
+  run.finishedAt = run.endedAt
+  run._proc = null
+}
 function isActive(r) { return r.status === 'running' || r.status === 'waiting' }
 function publicRun(r) {
-  const { _proc, ...rest } = r
+  const { _proc, _cwd, ...rest } = r
   return rest
+}
+function cancelRun(run) {
+  if (run._proc) {
+    try { run._proc.kill('SIGTERM') } catch {}
+  }
+  const now = Date.now()
+  run.status = 'cancelled'
+  run.finishedAt = now
+  run.endedAt = now
+  run.durationMs = run.durationMs ?? (now - run.startedAt)
+  run.exitCode = run.exitCode ?? -1
+  run._proc = null
+  return { ok: true, id: run.id, agent: run.agent }
+}
+function stopRunProcess(run) {
+  const proc = run?._proc
+  const pid = run?.pid || proc?.pid
+  if (!proc && !pid) return
+
+  if (process.platform === 'win32' && pid) {
+    try {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true })
+      killer.on('error', () => { try { proc?.kill() } catch {} })
+      return
+    } catch {}
+  }
+
+  try { proc?.kill() } catch {}
 }
 function compactStderr(stderr, code) {
   const text = String(stderr || '').trim()
@@ -459,13 +799,19 @@ function compactStderr(stderr, code) {
   return compact.length < text.length ? `[stderr tail]\n${compact}` : compact
 }
 
+function childRunEnv(run, extra = {}) {
+  const env = { ...process.env, ACC_PARENT: run.id, ACC_URL: `http://localhost:${PORT}`, ...extra }
+  if (ACC_TOKEN) env.ACC_TOKEN = ACC_TOKEN
+  return env
+}
+
 // Spawns claude, parses the stream-json output, updates the run, and streams text
 // deltas via onText. Resolves with the full result once the process closes.
 function runClaude({ run, args, cwd, onText }) {
   return new Promise(resolve => {
     // Pass the run id + server URL down so any agent that delegates via
     // agent-cli.mjs tags its sub-runs with this run as their parent.
-    const env = { ...process.env, ACC_PARENT: run.id, ACC_URL: `http://localhost:${PORT}` }
+    const env = childRunEnv(run)
     const proc = spawn(CLAUDE_EXE, args, { cwd, shell: false, stdio: ['pipe', 'pipe', 'pipe'], env })
     run.pid = proc.pid; run._proc = proc
     proc.stdin.end()
@@ -547,7 +893,7 @@ function runCodex({ run, prompt, model, cwd, onText }) {
     if (model && /^[\w.:-]+$/.test(model)) args.push('-m', model)
     args.push('-') // read prompt from stdin
     const cmd = [CODEX_EXE, ...args].map(cmdQuote).join(' ')
-    const env = { ...process.env, ACC_PARENT: run.id, ACC_URL: `http://localhost:${PORT}` }
+    const env = childRunEnv(run)
     // shell:true because codex is a .cmd on Windows. Prompt goes via stdin and
     // optional model names are pattern-checked before being placed on the command line.
     const proc = spawn(cmd, { cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'], env })
@@ -578,14 +924,220 @@ function runCodex({ run, prompt, model, cwd, onText }) {
   })
 }
 
-// Single entry point: picks Claude or Codex based on run.provider.
+// Runs a prompt through the Gemini CLI in headless mode. Prompt is fed via stdin;
+// -p " " triggers non-interactive mode without adding meaningful content to the prompt.
+// Falls back to npx @google/gemini-cli if gemini is not globally installed.
+// Cost is always 0 (free tier) — tracked by run count, not USD.
+function runGemini({ run, prompt, model, cwd, onText }) {
+  return new Promise(resolve => {
+    const geminiModel = model || GEMINI_MODEL
+    const exeBase = GEMINI_EXE ? cmdQuote(GEMINI_EXE) : 'npx @google/gemini-cli'
+    // -p " " enables headless (non-interactive) mode; the actual prompt arrives via stdin.
+    const cmd = `${exeBase} -p " " --yolo --skip-trust -o text${geminiModel ? ` -m ${cmdQuote(geminiModel)}` : ''}`
+    const env = childRunEnv(run, { GEMINI_CLI_TRUST_WORKSPACE: 'true', ...(GEMINI_API_KEY ? { GEMINI_API_KEY } : {}) })
+    const proc = spawn(cmd, { cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'], env })
+    run.pid = proc.pid; run._proc = proc
+    console.log(`[run ${run.id}] gemini PID ${proc.pid} agent=${run.agent} src=${run.source}${geminiModel ? ` model=${geminiModel}` : ''}`)
+    proc.stdin.write(prompt); proc.stdin.end()
+
+    let stdout = '', stderr = ''
+    proc.stdout.on('data', d => { stdout += d.toString() })
+    proc.stderr.on('data', d => { stderr += d.toString() })
+    proc.on('close', code => {
+      const out = stdout.trim() || (code !== 0 ? stderr.trim() : '')
+      onText?.(out)
+      finishRun(run, { status: code === 0 ? 'done' : 'error', exitCode: code, cost: 0, output: out.slice(0, 6000) })
+      console.log(`[run ${run.id}] gemini close code=${code}`)
+      resolve({ text: out, cost: 0, code, stderr })
+    })
+    proc.on('error', err => {
+      const hint = 'Install Gemini CLI: npm i -g @google/gemini-cli'
+      finishRun(run, { status: 'error', exitCode: -1 })
+      resolve({ text: '', cost: 0, code: -1, stderr: `${hint}\n${err.message}` })
+    })
+  })
+}
+
+// Ollama — calls the local REST API. think:false disables extended reasoning mode
+// (qwen3 thinking mode is slow; fine for chats but wasteful for quick agent tasks).
+async function runOllama({ run, prompt, sourcePrompt = prompt, model, onText }) {
+  if (gamingMode) {
+    const msg = '⚠️ Gaming mode is ON — Ollama skipped to free the GPU. Falling back is the caller\'s responsibility.'
+    finishRun(run, { status: 'error', exitCode: -1, output: msg })
+    return { text: '', cost: 0, code: -1, stderr: msg }
+  }
+  const m = model || OLLAMA_MODEL
+  const enrichedPrompt = injectFiles(prompt, run._cwd || null, sourcePrompt, run.agent)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS)
+  console.log(`[run ${run.id}] ollama model=${m} agent=${run.agent}`)
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: m,
+        messages: [
+          { role: 'system', content: CODE_EDITOR_SYSTEM_PROMPT },
+          { role: 'user', content: enrichedPrompt },
+        ],
+        stream: false,
+        think: false,
+        keep_alive: OLLAMA_KEEP_ALIVE
+      }),
+      signal: controller.signal
+    })
+    if (!res.ok) {
+      const err = `Ollama HTTP ${res.status}: ${await res.text()}`
+      finishRun(run, { status: 'error', exitCode: res.status, output: err })
+      return { text: '', cost: 0, code: res.status, stderr: err }
+    }
+    const json = await res.json()
+    const text = json.message?.content || json.response || ''
+    applyFileWrites(text, run._cwd, sourcePrompt, 'ollama')
+    onText?.(text)
+    finishRun(run, { status: 'done', exitCode: 0, cost: 0, output: text.slice(0, 6000) })
+    console.log(`[run ${run.id}] ollama done tokens=${json.eval_count ?? '?'}`)
+    return { text, cost: 0, code: 0, stderr: '' }
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? `Ollama timed out after ${OLLAMA_TIMEOUT_MS}ms` : err.message
+    finishRun(run, { status: 'error', exitCode: -1, output: msg })
+    return { text: '', cost: 0, code: -1, stderr: msg }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function runOpenAICompatibleChat({ run, prompt, sourcePrompt = prompt, model, onText, providerName, apiKey, apiKeyHint, baseUrl, timeoutMs, paid }) {
+  if (!apiKey) {
+    const msg = `${providerName} API key missing. Set ${apiKeyHint}.`
+    finishRun(run, { status: 'error', exitCode: -1, output: msg, providerTokens: 0 })
+    return { text: msg, cost: 0, code: -1, stderr: msg }
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const started = Date.now()
+  const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`
+  console.log(`[run ${run.id}] ${providerName.toLowerCase()} model=${model} agent=${run.agent}`)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: CODE_EDITOR_SYSTEM_PROMPT },
+          { role: 'user', content: prompt },
+        ],
+        stream: false,
+      }),
+      signal: controller.signal,
+    })
+    const raw = await res.text()
+    let json = {}
+    try { json = raw ? JSON.parse(raw) : {} } catch {}
+    if (!res.ok) {
+      const err = `${providerName} HTTP ${res.status}: ${json?.error?.message || raw || res.statusText}`
+      finishRun(run, { status: 'error', exitCode: res.status, output: err, durationMs: Date.now() - started })
+      return { text: err, cost: 0, code: res.status, stderr: err }
+    }
+
+    const text = json.choices?.[0]?.message?.content
+    if (typeof text !== 'string') {
+      const err = `${providerName} response missing choices[0].message.content`
+      finishRun(run, { status: 'error', exitCode: -1, output: err, durationMs: Date.now() - started })
+      return { text: err, cost: 0, code: -1, stderr: err }
+    }
+
+    const usage = json.usage || null
+    const promptTokens = Number(usage?.prompt_tokens || 0)
+    const completionTokens = Number(usage?.completion_tokens || 0)
+    const providerTokens = promptTokens + completionTokens || Number(usage?.total_tokens || 0)
+    applyFileWrites(text, run._cwd, sourcePrompt, run.provider || 'claude')
+    onText?.(text)
+    finishRun(run, {
+      status: 'done', exitCode: 0, cost: 0, usage, providerTokens,
+      durationMs: Date.now() - started, output: text.slice(0, 6000),
+    })
+    console.log(`[run ${run.id}] ${providerName.toLowerCase()} done tokens=${providerTokens} prompt=${promptTokens || '?'} completion=${completionTokens || '?'} cost=${paid ? 'paid' : 'free'}`)
+    return { text, cost: 0, code: 0, stderr: '', usage, providerTokens }
+  } catch (err) {
+    const msg = err.name === 'AbortError' ? `${providerName} timed out after ${timeoutMs}ms` : err.message
+    finishRun(run, { status: 'error', exitCode: -1, output: msg, durationMs: Date.now() - started })
+    return { text: msg, cost: 0, code: -1, stderr: msg }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function runDeepSeek({ run, prompt, sourcePrompt = prompt, model, onText }) {
+  const enrichedPrompt = injectFiles(prompt, run._cwd || null, sourcePrompt, run.agent)
+  return runOpenAICompatibleChat({
+    run, prompt: enrichedPrompt, sourcePrompt, model: model || DEEPSEEK_MODEL, onText,
+    providerName: 'DeepSeek',
+    apiKey: DEEPSEEK_API_KEY,
+    apiKeyHint: 'ACC_DEEPSEEK_API_KEY, DEEPSEEK_API_KEY, or config.json deepseekApiKey',
+    baseUrl: DEEPSEEK_BASE_URL,
+    timeoutMs: DEEPSEEK_TIMEOUT_MS,
+    paid: true,
+  })
+}
+
+function runGroq({ run, prompt, sourcePrompt = prompt, model, onText }) {
+  const enrichedPrompt = injectFiles(prompt, run._cwd || null, sourcePrompt, run.agent)
+  return runOpenAICompatibleChat({
+    run, prompt: enrichedPrompt, sourcePrompt, model: model || GROQ_MODEL, onText,
+    providerName: 'Groq',
+    apiKey: GROQ_API_KEY,
+    apiKeyHint: 'ACC_GROQ_API_KEY, GROQ_API_KEY, or config.json groqApiKey',
+    baseUrl: GROQ_BASE_URL,
+    timeoutMs: GROQ_TIMEOUT_MS,
+    paid: false,
+  })
+}
+
+function nonClaudeProviderModel(model, fallback = null) {
+  const m = String(model || '').trim()
+  if (!m || VALID_MODELS.includes(m) || /^claude-/i.test(m)) return fallback
+  return m
+}
+
+// Single entry point: picks Claude, Codex, Gemini, Ollama, DeepSeek, or Groq based on run.provider.
 function dispatchRun({ run, cwd, prompt, fullPrompt, continueSession, model, effort, delegate, onText }) {
   if (run.provider === 'codex') {
     // Codex (ChatGPT account) rejects Claude model names (opus/sonnet/haiku);
     // only forward a genuine Codex model, else let Codex use its default.
-    const codexModel = model && !VALID_MODELS.includes(model) ? model : null
+    const codexModel = nonClaudeProviderModel(model)
     run.model = codexModel
     return runCodex({ run, prompt: fullPrompt ?? prompt, model: codexModel, cwd, onText })
+  }
+  if (run.provider === 'gemini') {
+    // Gemini rejects Claude model names; only forward a model that looks like a Gemini model.
+    const geminiModel = nonClaudeProviderModel(model)
+    run.model = geminiModel || GEMINI_MODEL
+    return runGemini({ run, prompt: fullPrompt ?? prompt, model: run.model, cwd, onText })
+  }
+  if (run.provider === 'ollama') {
+    const ollamaModel = nonClaudeProviderModel(model, OLLAMA_MODEL)
+    run.model = ollamaModel
+    run._cwd = cwd
+    return runOllama({ run, prompt: fullPrompt ?? prompt, sourcePrompt: prompt, model: ollamaModel, onText })
+  }
+  if (run.provider === 'deepseek') {
+    const deepseekModel = nonClaudeProviderModel(model, DEEPSEEK_MODEL)
+    run.model = deepseekModel
+    run._cwd = cwd
+    return runDeepSeek({ run, prompt: fullPrompt ?? prompt, sourcePrompt: prompt, model: deepseekModel, onText })
+  }
+  if (run.provider === 'groq') {
+    const groqModel = nonClaudeProviderModel(model, GROQ_MODEL)
+    run.model = groqModel
+    run._cwd = cwd
+    return runGroq({ run, prompt: fullPrompt ?? prompt, sourcePrompt: prompt, model: groqModel, onText })
   }
   const args = buildArgs({ continueSession, model, effort, prompt, fullPrompt, delegate })
   return runClaude({ run, args, cwd, onText })
@@ -604,6 +1156,8 @@ function hasHistory(agent) {
 app.post('/run', async (req, res) => {
   const { agent, prompt, continueSession, model, effort, delegate, provider } = req.body
   if (!prompt?.trim()) return res.status(400).json({ error: 'prompt required' })
+  let runProvider
+  try { runProvider = normalizeProvider(provider) } catch (err) { return providerError(res, err) }
 
   const cwd = agentCwd(agent)
   // Fresh sessions get the latest memory log injected for prior-session context.
@@ -618,34 +1172,75 @@ app.post('/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
   const sse = o => { try { res.write(`data: ${JSON.stringify(o)}\n\n`) } catch {} }
+  const heartbeat = setInterval(() => sse({ heartbeat: Date.now() }), 25000)
+  heartbeat.unref?.()
 
-  const run = newRun({ agent, prompt, model, effort, source: 'dashboard', provider: provider === 'codex' ? 'codex' : 'claude' })
+  const run = newRun({ agent, prompt, model, effort, source: 'dashboard', provider: runProvider })
   sse({ runId: run.id, provider: run.provider })
 
   res.on('close', () => {
-    if (isActive(run)) { try { run._proc?.kill() } catch {} ; finishRun(run, { status: 'error', exitCode: -1 }) }
+    clearInterval(heartbeat)
+    if (isActive(run)) { stopRunProcess(run); finishRun(run, { status: 'error', exitCode: -1 }) }
   })
 
   // Allow subtasking on top-level runs by default (opt out with delegate:false).
   const r = await dispatchRun({ run, cwd, prompt, fullPrompt, continueSession, model, effort, delegate: delegate !== false, onText: t => sse({ text: t }) })
+  clearInterval(heartbeat)
   const err = compactStderr(r.stderr, r.code)
   if (err) sse({ error: err })
-  sse({ done: true, code: r.code, cost: r.cost, codexTokens: run.codexTokens, durationMs: run.durationMs, numTurns: run.numTurns, usage: run.usage })
+  sse({ done: true, code: run.exitCode ?? r.code, cost: r.cost, codexTokens: run.codexTokens, providerTokens: run.providerTokens, durationMs: run.durationMs, numTurns: run.numTurns, usage: run.usage })
   res.end()
 })
 
-// POST /dispatch — synchronous single agent run (used for agent-to-agent calls).
-// Returns JSON when the run finishes. Always a fresh session (one-shot task).
+// POST /run/latest/stop - cancel the most recent active run.
+app.post('/run/latest/stop', (req, res) => {
+  const run = [...runs.values()].reverse().find(r => r.status === 'running')
+  if (!run) return res.status(404).json({ error: 'no active runs' })
+  res.json(cancelRun(run))
+})
+
+// POST /run/:id/stop - cancel a specific active run.
+app.post('/run/:id/stop', (req, res) => {
+  const run = runs.get(req.params.id)
+  if (!run) return res.status(404).json({ error: 'run not found' })
+  if (!isActive(run)) return res.status(400).json({ error: 'run already finished', status: run.status })
+  res.json(cancelRun(run))
+})
+
+// POST /btw - queue a message to inject into the next manager tick or follow-up run.
+app.post('/btw', (req, res) => {
+  const message = req.body?.message
+  if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ error: 'message required' })
+  btwQueue.push({ message: message.trim(), queuedAt: Date.now() })
+  res.json({ ok: true, queued: btwQueue.length })
+})
+
+// GET /btw - inspect queued messages without clearing them.
+app.get('/btw', (_, res) => {
+  res.json({ messages: btwQueue.map(e => e.message) })
+})
+
+// DELETE /btw - clear queued BTW messages.
+app.delete('/btw', (_, res) => {
+  const cleared = btwQueue.length
+  btwQueue.length = 0
+  res.json({ ok: true, cleared })
+})
+
+// POST /dispatch - synchronous single agent run (used for agent-to-agent calls).
+// Returns JSON when the run finishes. Usually fresh; BTW follow-ups may continue.
 app.post('/dispatch', async (req, res) => {
-  const { agent, prompt, model, effort, parent, provider } = req.body
+  const { agent, prompt, model, effort, parent, provider, continueSession = false } = req.body
   if (!agent || !prompt?.trim()) return res.status(400).json({ error: 'agent and prompt required' })
   if (!(agent in AGENT_DIRS) && !fs.existsSync(agentCwd(agent)))
     return res.status(404).json({ error: `unknown agent: ${agent}` })
+  let runProvider
+  try { runProvider = normalizeProvider(provider) } catch (err) { return providerError(res, err) }
 
   const cwd = agentCwd(agent)
-  const run = newRun({ agent, prompt, model, effort, parent: parent || null, source: 'agent', provider: provider === 'codex' ? 'codex' : 'claude' })
-  const r = await dispatchRun({ run, cwd, prompt, fullPrompt: prompt, continueSession: false, model, effort, delegate: false })
-  res.json({ runId: run.id, agent, provider: run.provider, output: r.text, cost: r.cost, codexTokens: run.codexTokens, exitCode: r.code, durationMs: run.durationMs })
+  const run = newRun({ agent, prompt, model, effort, parent: parent || null, source: 'agent', provider: runProvider })
+  const r = await dispatchRun({ run, cwd, prompt, fullPrompt: prompt, continueSession, model, effort, delegate: false })
+  res.json({ runId: run.id, agent, provider: run.provider, output: r.text, cost: r.cost, codexTokens: run.codexTokens, providerTokens: run.providerTokens, exitCode: run.exitCode ?? r.code, durationMs: run.durationMs })
 })
 
 // POST /swarm — run many agents in parallel. tasks: [{agent,prompt,model,effort,provider}]
@@ -653,13 +1248,17 @@ app.post('/swarm', async (req, res) => {
   const { tasks, parent } = req.body
   if (!Array.isArray(tasks) || !tasks.length) return res.status(400).json({ error: 'tasks array required' })
   if (tasks.length > 12) return res.status(400).json({ error: 'too many tasks (max 12)' })
+  let normalizedTasks
+  try {
+    normalizedTasks = tasks.map(t => ({ ...t, provider: normalizeProvider(t?.provider) }))
+  } catch (err) { return providerError(res, err) }
 
-  const results = await Promise.all(tasks.map(async t => {
+  const results = await Promise.all(normalizedTasks.map(async t => {
     if (!t?.agent || !t?.prompt?.trim()) return { agent: t?.agent || '(none)', output: '', cost: 0, exitCode: -1, error: 'agent and prompt required' }
     const cwd = agentCwd(t.agent)
-    const run = newRun({ agent: t.agent, prompt: t.prompt, model: t.model, effort: t.effort, parent: parent || 'swarm', source: 'swarm', provider: t.provider === 'codex' ? 'codex' : 'claude' })
+    const run = newRun({ agent: t.agent, prompt: t.prompt, model: t.model, effort: t.effort, parent: parent || 'swarm', source: 'swarm', provider: t.provider })
     const r = await dispatchRun({ run, cwd, prompt: t.prompt, fullPrompt: t.prompt, continueSession: false, model: t.model, effort: t.effort, delegate: false })
-    return { runId: run.id, agent: t.agent, provider: run.provider, output: r.text, cost: r.cost, exitCode: r.code }
+    return { runId: run.id, agent: t.agent, provider: run.provider, output: r.text, cost: r.cost, providerTokens: run.providerTokens, exitCode: r.code }
   }))
   res.json({ count: results.length, totalCost: results.reduce((s, r) => s + (r.cost || 0), 0), tasks: results })
 })
@@ -698,6 +1297,12 @@ function codexTokensToday() {
     .reduce((s, r) => s + (r.codexTokens || 0), 0)
 }
 
+function providerTokensToday(provider) {
+  const today = new Date().toDateString()
+  return [...runs.values()].filter(r => r.provider === provider && new Date(r.startedAt).toDateString() === today)
+    .reduce((s, r) => s + (r.providerTokens || 0), 0)
+}
+
 // Target ceiling: Jarvis should push Claude usage up to this fraction of each
 // window before spilling work to Codex, but keep the rest in reserve.
 const USAGE_TARGET = Number(pick('ACC_USAGE_TARGET', 'usageTarget', 0.75))
@@ -713,7 +1318,7 @@ function claudeUtilization() {
 // reserve + spill to Codex) | 'blocked' (rejected/out of credits → Codex only).
 function claudeState() {
   const u = lastUsage
-  if (u && (u.status === 'rejected' || u.overageDisabledReason === 'out_of_credits')) return 'blocked'
+  if (u && u.status === 'rejected') return 'blocked'
   const util = claudeUtilization()
   const warning = Object.values(usageWindows).some(w => String(w.status || '').includes('warning'))
   if (warning || (util !== null && util >= USAGE_TARGET)) return 'warning'
@@ -736,7 +1341,18 @@ app.get('/usage', (_, res) => {
     resetsAt: u?.resetsAt || null,
     costToday: costToday(),
     codexTokensToday: codexTokensToday(),
+    deepseekTokensToday: providerTokensToday('deepseek'),
+    groqTokensToday: providerTokensToday('groq'),
+    gamingMode,
   })
+})
+
+// POST /gaming — toggle gaming mode (disables Ollama so the GPU is fully free).
+app.post('/gaming', (req, res) => {
+  const on = req.body?.on
+  gamingMode = typeof on === 'boolean' ? on : !gamingMode
+  console.log(`[gaming] mode ${gamingMode ? 'ON' : 'OFF'}`)
+  res.json({ gamingMode })
 })
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -764,7 +1380,7 @@ function saveSchedule(list) { try { fs.writeFileSync(SCHEDULE_FILE, JSON.stringi
 for (const t of loadSchedule()) { const n = parseInt(String(t.id).replace(/\D/g, ''), 10); if (n > schedSeq) schedSeq = n }
 
 // Briefing handed to Jarvis on each manager tick: current state + guardrails.
-async function buildManagerBriefing() {
+async function buildManagerBriefing(state = claudeState()) {
   const todos = []
   for (const a of Object.keys(AGENT_DIRS)) {
     const log = latestLog(a); if (!log) continue
@@ -776,11 +1392,36 @@ async function buildManagerBriefing() {
   const utilPct = util === null ? null : Math.round(util * 100)
   const targetPct = Math.round(USAGE_TARGET * 100)
   const codexTok = codexTokensToday()
-  const state = claudeState() // 'ok' | 'warning' | 'blocked'
+  const deepseekTok = providerTokensToday('deepseek')
+  const groqTok = providerTokensToday('groq')
+  // state: 'ok' | 'warning' | 'blocked'
   const jlog = latestLog('jarvis')
+  const goalsContent = readBriefingFile(GOALS_FILE)
+  const jarvisMemoryPath = jlog ? path.join(JARVIS_MEMORY_DIR, jlog.file) : path.join(JARVIS_MEMORY_DIR, 'YYYY-MM-DD.md')
+  const jarvisMemoryContent = jlog ? lastLines(jlog.content, 150) : `(No Jarvis memory log found in ${JARVIS_MEMORY_DIR})`
+  const jarvisMemoryTemplate = path.join(JARVIS_MEMORY_DIR, 'YYYY-MM-DD.md')
 
   let b = `[Jarvis manager tick — ${new Date().toLocaleString()}]\n\n`
-  b += `You are running autonomously as Lachy's manager (he's "out and about" — act, don't ask). You have standing authority to delegate via agent-cli.mjs across BOTH providers: Claude Code (\`--model\`) and Codex (\`--codex\`).\n\n`
+  b += `You are running autonomously as Lachy's manager (he's "out and about" — act, don't ask). You have standing authority to delegate via agent-cli.mjs across SIX providers: Claude (\`--model\`), Codex (\`--codex\`), Gemini (\`--gemini\`), Ollama (\`--ollama\`), DeepSeek (\`--deepseek\`), and Groq (\`--groq\`).\n\n`
+  b += `TOOLS:\n`
+  b += `  - agent-cli full path: ${AGENT_CLI_PATH}\n`
+  b += `  - Delegate one agent: node '${AGENT_CLI_PATH}' run <agent> '<prompt>' [--codex] [--gemini] [--groq] [--deepseek] [--ollama]\n`
+  b += `  - For Claude delegation, omit provider flags or add \`--model haiku|sonnet|opus\` when needed.\n`
+  b += `  - Post to #jarvis: node '${AGENT_CLI_PATH}' discord say jarvis '<message>'\n`
+  b += `  - Obsidian root: ${OBSIDIAN_ROOT}\n`
+  b += `  - Business goals file: ${GOALS_FILE}\n`
+  b += `  - Agent memory root: ${MEMORY_ROOT}\n`
+  b += `  - Jarvis memory directory: ${JARVIS_MEMORY_DIR}\n`
+  b += `  - Jarvis memory log read/write path: ${jarvisMemoryTemplate}\n\n`
+  b += `PROVIDER HIERARCHY (follow this unless overridden below):\n`
+  b += `  🧠 Claude   — File access, real project knowledge, complex reasoning. Use for anything requiring reading actual files, real audits, substantive code changes, high-value decisions. Your own thinking always stays here.\n`
+  b += `  🟢 Codex    — File access, runs in the project directory. Use for code tasks, file edits, audits, status checks, and anything needing real file context.\n`
+  b += `  ♊ Gemini   — File access via CLI. Use for large-context analysis, second opinions on provided text or accessible project content, and documentation. Free until Jun 18 2026.\n`
+  b += `  🦙 Ollama   — TEXT GENERATION ONLY. NO file access. NO project directory access. Will hallucinate if asked to review real projects. ONLY use for writing/drafting tasks where ALL needed context is explicitly included in the prompt.${gamingMode ? ' ⛔ GAMING MODE ON — Ollama is DISABLED (GPU reserved). Skip it entirely.' : ''}\n`
+  b += `  ⚡ Groq     — TEXT GENERATION ONLY. NO file access. NO project directory access. Will hallucinate if asked to review real projects. ONLY use for writing/drafting tasks where ALL needed context is explicitly included in the prompt.\n`
+  b += `  💙 DeepSeek — TEXT GENERATION ONLY. NO file access. NO project directory access. Will hallucinate if asked to review real projects. ONLY use for writing/drafting tasks where ALL needed context is explicitly included in the prompt.\n`
+  b += `  Hard rule: Ollama/Groq/DeepSeek are REST API text generators. NEVER use them for audits, reviews, status checks, codebase inspection, real file/project questions, or anything requiring knowledge of real files.\n`
+  b += `  When in doubt about whether a task needs file access, use Codex or Claude — never assume Groq/DeepSeek/Ollama can find the information themselves.\n\n`
 
   // Per-window Claude usage
   b += `CLAUDE USAGE:\n`
@@ -788,15 +1429,16 @@ async function buildManagerBriefing() {
   if (wins.length) {
     for (const w of wins) b += `  - ${w.rateLimitType}: ${w.utilization != null ? Math.round(w.utilization * 100) + '%' : w.status}${w.resetsAt ? ` (resets ${new Date(w.resetsAt * 1000).toLocaleTimeString()})` : ''}\n`
   } else b += `  - (no data yet)\n`
-  b += `CODEX USAGE: ~${codexTok.toLocaleString()} tokens used today (separate ChatGPT/Codex plan).\n\n`
+  b += `CODEX USAGE: ~${codexTok.toLocaleString()} tokens used today (separate ChatGPT/Codex plan). GROQ: ~${groqTok.toLocaleString()} tokens today (free tier; watch rate limits). DEEPSEEK: ~${deepseekTok.toLocaleString()} paid tokens today. GEMINI: free tier — use \`--gemini\` freely (free window closes Jun 18 2026).\n\n`
 
-  b += `BUDGET POLICY — work BOTH providers hard (Lachy wants ~${targetPct}% utilisation), keep ~${100 - targetPct}% in reserve. NOTE: Claude only reports an exact % near the cap, so use this signal:\n`
+  b += `BUDGET POLICY — use non-Claude providers deliberately where they fit; use Codex/Gemini for file-aware work and Ollama/Groq/DeepSeek only for fully-contexted text generation. Use Claude capacity for tasks that need it (target ~${targetPct}% utilisation), keeping ~${100 - targetPct}% in reserve. NOTE: Claude only reports an exact % near the cap, so use this signal:\n`
   if (state === 'blocked') {
-    b += `  ⛔ Claude is RATE-LIMITED right now. Route all work to Codex (\`--codex\`). Keep Claude only for your own cheap thinking so you stay alive.\n`
+    b += `  Manager running on Codex fallback — Claude quota exhausted.\n`
+    b += `  ⛔ Claude is RATE-LIMITED right now. Route file-aware worker tasks to Codex or Gemini; use Ollama/Groq/DeepSeek only for writing/drafting when the prompt contains all needed context.\n`
   } else if (state === 'warning') {
-    b += `  ⚠️ Claude is NEAR the cap${utilPct != null ? ` (~${utilPct}%)` : ''}. Spill new delegation to Codex (\`--codex\`); reserve remaining Claude for orchestration + your own ticks.\n`
+    b += `  ⚠️ Claude is NEAR the cap${utilPct != null ? ` (~${utilPct}%)` : ''}. Follow the provider hierarchy with extra discipline: Codex/Gemini for work needing files or CLI context; Ollama/Groq/DeepSeek only for fully-contexted text generation; reserve remaining Claude for orchestration and genuinely necessary complex work.\n`
   } else {
-    b += `  ✅ Claude is GREEN (below the warning threshold — plenty of headroom). Use it: delegate MULTIPLE to-dos in parallel this tick to make real progress. Prefer Claude for substantive work (you're the smartest); send overflow/bulk to Codex (\`--codex\`) to spread load. Always keep enough Claude headroom to run your own manager ticks.\n`
+    b += `  ✅ Claude is GREEN (below the warning threshold — plenty of headroom). Follow the provider hierarchy strictly regardless: Codex/Gemini for file-aware work, Ollama/Groq/DeepSeek only for fully-contexted text generation, Claude only for complex multi-step work that genuinely needs it. Do not use Claude just because it is available. Delegate multiple to-dos in parallel this tick to make real progress with the right provider for each task.\n`
   }
   b += `  Prefer haiku for cheap sub-tasks. Reserve opus/sonnet for high-value work.\n`
 
@@ -807,32 +1449,46 @@ async function buildManagerBriefing() {
 
   // Month-start: trigger the big monthly planning + money report on the 1st.
   if (new Date().getDate() === 1) {
-    b += `\n📅 IT'S THE 1ST — MONTH START. Do the big planning pass: roll \`business\\goals.md\` forward (new revenue target + goals), review every project, set this month's venture experiments, and post a money + goals update to the #money channel via \`node agent-cli.mjs discord say money "..."\`. This is a heavy tick — plan thoroughly.\n`
+    b += `\n📅 IT'S THE 1ST — MONTH START. Do the big planning pass: roll \`${GOALS_FILE}\` forward (new revenue target + goals), review every project, set this month's venture experiments, and post a money + goals update to the #money channel via \`node '${AGENT_CLI_PATH}' discord say money '<message>'\`. This is a heavy tick — plan thoroughly.\n`
   }
 
   b += `\nOUTSTANDING (${todos.length}):\n` + (todos.length
     ? todos.map(t => `- ${t.blocked ? '[BLOCKED] ' : ''}${t.agent}: ${(t.flags || []).slice(0, 2).join(' · ') || 'blocked'}`).join('\n')
     : '- none')
-  b += `\n\nAlso advance Lachy's standing goals (web-dev client growth, Etsy, profitability, his projects) per your CLAUDE.md — not just blockers. Pick concrete actions, delegate them, and report crisply.`
-  if (jlog) b += `\n\n--- Your last memory log (${jlog.file}) ---\n${jlog.content.slice(0, 1500)}`
+  b += `\n\nAlso advance Lachy's standing goals (web-dev client growth, Etsy, profitability, his projects) per the injected goals file and your CLAUDE.md — not just blockers. Pick concrete actions, delegate them, and report crisply.`
+  b += `\n\nPROACTIVE RESEARCH MANDATE: When there are no blocking tasks, do NOT sit idle. Pick ONE and execute it this tick: research a new income stream and write a brief to ${BUSINESS_DIR}; find 3 new web dev leads on Mornington Peninsula Facebook groups and draft outreach messages; research an AID Helpdesk competitor and write a comparison brief; investigate a new Etsy niche for demand vs competition; research an AI tool or API that could become a product; draft a cold email sequence for a business type Lachy has not targeted yet; look for automation opportunities in the current workflow. Save output to Obsidian under ${OBSIDIAN_ROOT}. Never end a tick with nothing done.`
+  b += `\n\n--- Injected file: ${GOALS_FILE} (full content) ---\n${goalsContent}`
+  b += `\n\n--- Injected file: ${jarvisMemoryPath} (last 150 lines) ---\n${jarvisMemoryContent}`
   b += `\n\nAt the END of your response, remind Lachy in BOLD to run \`!jarvislog\` so this session can hand over.`
+  if (btwQueue.length) {
+    const entries = btwQueue.slice()
+    b += `\n\nBTW QUEUE (Lachy injected while you were running — act on these this tick):\n`
+    b += entries.map((e, i) => `${i + 1}. ${e.message}`).join('\n')
+    btwQueue.length = 0
+  }
   return b
 }
 
 async function runScheduledTask(t) {
   try {
     if (t.type === 'manager') {
-      let briefing = await buildManagerBriefing()
-      if (t.preferCodex) briefing += `\n\n⚙️ PREFER CODEX: Lachy values Claude usage highly — route EVERY worker delegation to Codex (\`--codex\`) regardless of Claude state. Keep only your own thinking on Claude.`
+      const managerState = claudeState()
+      // A manager schedule may override the env default for the manager runner.
+      // 'ollama' or 'deepseek' = local/cheap always-on manager.
+      // Falls back to codex if the selected manager provider is Claude and Claude is blocked.
+      const preferredMgr = normalizeProvider(t.provider || MANAGER_PROVIDER || 'claude')
+      const managerProvider = (managerState === 'blocked' && preferredMgr === 'claude') ? 'codex' : preferredMgr
+      const managerModel = managerProvider === 'claude' ? (t.model || 'sonnet') : nonClaudeProviderModel(t.model)
+      let briefing = await buildManagerBriefing(managerState)
       if (t.prompt) briefing += `\n\nSPECIAL DIRECTIVE THIS TICK:\n${t.prompt}`
       // Coherent Jarvis: resume its one thread if it exists, else fresh (the
       // briefing already carries memory). Same logic as !run jarvis, so manager
       // ticks and ad-hoc chats are the SAME Jarvis.
       const cont = hasHistory('jarvis')
-      const run = newRun({ agent: 'jarvis', prompt: '[manager tick]', model: t.model || 'sonnet', effort: t.effort, source: 'manager' })
-      await dispatchRun({ run, cwd: agentCwd('jarvis'), prompt: briefing, fullPrompt: briefing, continueSession: cont, model: t.model || 'sonnet', effort: t.effort, delegate: true })
+      const run = newRun({ agent: 'jarvis', prompt: '[manager tick]', model: managerModel, effort: t.effort, source: 'manager', provider: managerProvider })
+      await dispatchRun({ run, cwd: agentCwd('jarvis'), prompt: briefing, fullPrompt: briefing, continueSession: cont, model: managerModel, effort: t.effort, delegate: true })
     } else {
-      const run = newRun({ agent: t.agent, prompt: t.prompt, model: t.model, effort: t.effort, source: 'schedule', provider: t.provider === 'codex' ? 'codex' : 'claude' })
+      const run = newRun({ agent: t.agent, prompt: t.prompt, model: t.model, effort: t.effort, source: 'schedule', provider: normalizeProvider(t.provider) })
       await dispatchRun({ run, cwd: agentCwd(t.agent), prompt: t.prompt, fullPrompt: t.prompt, continueSession: false, model: t.model, effort: t.effort, delegate: true })
     }
   } catch (e) { console.warn(`[sched ${t.id}] failed:`, e.message) }
@@ -867,16 +1523,20 @@ app.post('/schedule', (req, res) => {
   const { type = 'agent', agent, prompt, model, effort, everyMin, runAt, provider, activeHours } = req.body || {}
   if (type === 'agent' && (!agent || !prompt?.trim())) return res.status(400).json({ error: 'agent + prompt required' })
   if (!everyMin && !runAt) return res.status(400).json({ error: 'everyMin or runAt required' })
+  const scheduleProvider = type === 'manager' ? (provider ?? MANAGER_PROVIDER) : provider
+  let runProvider
+  try { runProvider = normalizeProvider(scheduleProvider) } catch (err) { return providerError(res, err) }
   const list = loadSchedule()
   const now = Date.now()
   const task = {
     id: `s${++schedSeq}`, type, agent: agent || (type === 'manager' ? 'jarvis' : agent),
     prompt: prompt || null, model: model || null, effort: effort || null,
-    provider: provider === 'codex' ? 'codex' : 'claude',
+    provider: runProvider,
     everyMin: everyMin ? Number(everyMin) : null, runAt: runAt ? Number(runAt) : null,
     nextRun: runAt ? Number(runAt) : now + (Number(everyMin) || 0) * 60000,
     activeHours: Array.isArray(activeHours) ? activeHours : null,
     preferCodex: !!(req.body || {}).preferCodex,
+    preferOllama: !!(req.body || {}).preferOllama,
     enabled: true, createdAt: now,
   }
   list.push(task); saveSchedule(list)
@@ -1076,5 +1736,5 @@ app.listen(PORT, () => {
   console.log(`\n  AI Command Center`)
   console.log(`  Local  →  http://localhost:${PORT}`)
   console.log(`  Tunnel →  cloudflared tunnel --url http://localhost:${PORT}`)
-  console.log(`  Auth   →  ${ACC_SECRET ? 'ON (ACC_SECRET set)' : 'OFF — localhost only, do not expose'}\n`)
+  console.log(`  Auth   →  ${AUTH_TOKENS.size ? 'ON (ACC_SECRET/ACC_TOKEN set)' : 'OFF — localhost only, do not expose'}\n`)
 })

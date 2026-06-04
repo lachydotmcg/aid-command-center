@@ -1,264 +1,222 @@
 # AI Command Center
 
-> Talk to Jarvis in Discord. Jarvis orchestrates a swarm of specialist Claude agents — building client websites, running your projects, and managing your business — while you get on with your day.
+My personal setup for running a fleet of AI agents from my phone, through Discord.
 
-A local Node.js server + Discord bot that turns a private Discord server into a command console for a fleet of AI agents. Each agent runs [Claude Code](https://claude.com/claude-code) inside its own project directory. You give orders through Discord; the agents work in the background and report back in their own channels. A browser dashboard gives you a live overview.
+Jarvis lives in the background, manages my web dev clients, handles incoming leads, and works through my to-do list while I get on with my day. When I need something specific, I just message the right channel.
+
+---
+
+## What I actually use it for
+
+**Morning briefing**
+Jarvis runs on a schedule and kicks off the day: checks what agents flagged overnight, pulls a Gemini AI news summary, and posts it to Discord before I'm out of bed.
+
+**Client website management**
+Every client has their own agent and Discord channel. When I need a page updated, copy rewritten, or a form fixed, I drop a message in their channel. The agent works on the live project directory and reports back when it's done.
+
+**Lead intake from Netlify forms**
+Contact forms on my client sites POST to a webhook. Each submission lands in a `#leads` channel and Jarvis automatically triages it: adds it to the pipeline in my money log, drafts a reply email, and suggests a follow-up time. I just hit send.
+
+**Business planning and revenue tracking**
+Jarvis maintains a `goals.md` and `money-log.md` in my Obsidian vault. Every manager tick it checks progress against the month's revenue target, drafts outreach for warm leads, and flags anything that needs me specifically.
+
+**Provider rotation so I never run out**
+The system runs Claude, Codex, Gemini, and Groq. When Claude's usage window gets tight, tasks automatically spill to the next available provider. Scheduled jobs have fallback chains built in so they always run something even if the primary is capped.
+
+**Stripe and Netlify webhooks**
+Payment events and form submissions both route through the same server. Stripe webhooks update the money log when a client pays. Netlify form webhooks go straight to Jarvis for triage.
+
+**Side project agents**
+Separate agents handle the Etsy store, app projects, and anything else running in parallel. Jarvis coordinates them and keeps the Discord channels clean.
 
 ---
 
 ## How it works
 
 ```
-You (Discord)
-    │
-    ▼
-Discord Bot (!run, !manage, !swarm, !jarvislog …)
-    │
-    ▼
-AI Command Center — Express server (localhost:3333)
-    │
-    ├─▶  Jarvis (manager agent)
-    │        └─▶ delegates to specialist agents via !swarm / dispatch
-    │
-    ├─▶  sandwich-house (client website)
-    ├─▶  hoagies        (client website)
-    ├─▶  aid-helpdesk   (IT project)
-    └─▶  … 15+ more agents
+Discord (phone or desktop)
+    |
+    v
+Discord Bot  (!run, !manage, !swarm, !schedule ...)
+    |
+    v
+Express server  (localhost:3333)
+    |
+    +-- Jarvis (orchestrator)
+    |       |
+    |       +-- delegates to specialist agents
+    |       +-- reads usage, picks provider (Claude / Codex / Gemini / Groq)
+    |       +-- posts updates to Discord channels
+    |
+    +-- Per-agent runners (Claude Code, Codex, Gemini CLI, Groq)
+    |
+    +-- Webhooks  (Netlify forms, Stripe)
+    |
+    +-- Scheduler  (daily briefing, recurring tasks, provider-aware fallbacks)
 ```
 
-Every agent has its own project directory, a `CLAUDE.md` with its role and standing instructions, and a daily memory log. Jarvis reads all outstanding flags and blockers, decides what needs doing, and fans work out to the right specialists — in parallel, across two AI providers (Claude + Codex).
+Each agent has its own project directory, a `CLAUDE.md` with its role, and a daily memory log in Obsidian. Jarvis reads all outstanding flags each tick and fans work out to the right specialists.
 
 ---
 
 ## Agent roster
 
-| Agent | Role |
-|-------|------|
-| **jarvis** | Orchestrator. Reviews daily to-dos, delegates to specialist agents, manages Claude/Codex usage budgets, posts monthly revenue/goals reports. |
-| **lachys-web-dev** | Lachy's web dev business — main client intake, billing, and business strategy. |
-| **club-window-services** | Client website — Club Window Services. |
-| **making-moves-express** | Client website — Making Moves Express. |
-| **fun-raising** | Client website — Fun Raising. |
-| **lachys-gardening** | Client website — Lachy's Gardening Maintenance. |
-| **ggl-maintenance** | Client website — GGL Maintenance. |
-| **llewellyn-property** | Client website — Llewellyn Property Maintenance. |
-| **vp-elite** | Client website — VP Elite Headlight Restoration. |
-| **sandwich-house** | Client website — Sandwich House. |
-| **hoagies** | Client website — Hoagies. |
-| **kanadojo** | Kana Dojo — Japanese learning app. |
-| **aid-helpdesk** | Active Directory helpdesk tool. |
-| **eshis-curriculum** | Eshi's curriculum project. |
-| **sbl-rankings** | SBL Rankings site. |
-| **command-center** | This project — the server manages itself. |
+| Agent | What it does |
+|---|---|
+| **jarvis** | Orchestrator. Morning briefings, manager ticks, lead triage, monthly revenue reports. |
+| **lachys-web-dev** | My web dev business overall: client intake, billing, business strategy. |
+| **club-window-services** | Client site. |
+| **making-moves-express** | Client site. |
+| **fun-raising** | Client site. |
+| **lachys-gardening** | Client site. |
+| **ggl-maintenance** | Client site. |
+| **llewellyn-property** | Client site. |
+| **vp-elite** | Client site. |
+| **sandwich-house** | Client site. |
+| **hoagies** | Client site. |
+| **kanadojo** | Japanese learning app (Next.js). |
+| **aid-helpdesk** | Active Directory helpdesk SaaS. |
+| **eshis-curriculum** | School curriculum app. |
+| **sbl-rankings** | Rankings site. |
+| **etsy-agent** | Etsy store listings and product pipeline. |
+| **command-center** | This project. Agents can improve it and commit changes themselves. |
 
-New agents can be added at any time with `!new-agent <name>` — it scaffolds the project folder, `CLAUDE.md`, and memory directory automatically.
+New agents: `!new-agent <name>` scaffolds the folder, CLAUDE.md, and memory directory.
 
 ---
 
 ## Discord commands
 
-The bot is the primary interface. Run these from any channel, or from an agent's dedicated channel (where `[agent]` can be omitted).
-
-### Day-to-day
+### Running agents
 
 | Command | What it does |
-|---------|--------------|
-| `!run [agent] <prompt>` | Send a prompt to an agent. Continues the last session by default; injects today's memory log on first run. Supports `-opus`, `-sonnet`, `-haiku`, `-codex`, `--effort high`. |
-| `!jarvislog [agent]` | Tell an agent to write its session memory log — the key handover step before closing a session. |
+|---|---|
+| `!run [agent] <prompt>` | Send a prompt to an agent. Picks up the last session automatically. Supports `-opus`, `-sonnet`, `-haiku`, `-codex`, `-gemini`, `--effort high`. |
+| `!run [agent]` + attach `.txt` | For long prompts, attach a text file and the bot reads it. |
+| `!swarm agent1,agent2 <prompt>` | Same prompt to multiple agents in parallel. |
+| `!jarvislog [agent]` | Tell an agent to write its session memory log. |
 | `!log [agent]` | Show an agent's latest memory log. |
-| `!history [agent]` | Show the last 8 conversation messages for an agent. |
-| `!todos` | Scan every agent's memory for outstanding flags (`🚩 Flags for Lachy`) and blocked statuses. |
-| `!agents` | List all agents with their latest status emoji. |
-| `!runs` | Live registry — who's working right now, recent finished runs, cost today. |
-| `!usage` | Claude and Codex usage/rate-limit status + today's spend. |
+| `!history [agent]` | Last 8 conversation messages for an agent. |
 
 ### Orchestration
 
 | Command | What it does |
-|---------|--------------|
-| `!swarm agent1,agent2,agent3 <prompt>` | Fan the same prompt out to several agents in parallel. Results post to each agent's channel. |
-| `!manage [minutes]` | Turn on Jarvis as a background manager. Every N minutes (default 60) Jarvis reviews all to-dos, delegates work to specialists, and posts what it did. |
-| `!manage stop` | Turn the manager loop off. |
-| `!manage hours mon-fri 9-17` | Restrict manager ticks to active hours (e.g. `mon-wed 7-17, thu 7-13`). |
-| `!manage codex` | Switch manager loop to prefer Codex for all worker tasks (saves Claude quota). |
-| `!schedule every 30 hoagies <prompt>` | Schedule recurring agent runs. `!schedule list` · `!schedule cancel <id>`. |
+|---|---|
+| `!manage [minutes]` | Start Jarvis as a background manager. Ticks every N minutes (default 60). |
+| `!manage stop` | Stop the manager loop. |
+| `!manage hours mon-fri 9-17` | Restrict ticks to active hours only. |
+| `!manage codex` | Route all worker tasks to Codex to save Claude quota. |
+| `!schedule every 30 hoagies <prompt>` | Recurring scheduled runs. |
+| `!todos` | Scan every agent's memory for outstanding flags and blockers. |
 
-### Server management
+### Discord and server
 
 | Command | What it does |
-|---------|--------------|
-| `!sync` | Create/update Discord categories (🤖 Core · 🌐 Web Dev) and channels for all agents. |
-| `!board` | Post a pinned, auto-refreshing status board in `#status-board`. |
-| `!activity` | Start posting to `#activity-feed` whenever an agent logs a new memory update. |
-| `!mirror` | Mirror delegated run output into each agent's own channel. |
-| `!new-agent <name> [dir]` | Scaffold a new agent (project dir + `CLAUDE.md` + memory folder). |
-| `!archive <agent>` | Move an agent's channel to the 🗄 Archive category (`undo` to restore). |
-| `!money` | Create the `#money` channel for Jarvis's monthly revenue/goals updates. |
-| `!leads` | Create `#leads` + show the form-webhook URL to wire into your sites. |
-| `!goals` | Show business goals · `!goal add <text>` to append one. |
-| `!model [agent] opus high` | Set a per-agent default model/effort for subsequent `!run` calls. |
-| `!gif <name\|list>` | Post a reaction GIF (thinking, coding, done, error, money…). |
+|---|---|
+| `!agents` | List all agents with status. |
+| `!runs` | Live run registry: who is active, recent results, cost today. |
+| `!usage` | Claude and Codex usage, rate-limit status, today's spend. |
+| `!sync` | Create Discord categories and channels for all agents. |
+| `!board` | Live-updating status board in `#status-board`. |
+| `!mirror` | Stream agent output into each agent's own channel. |
+| `!leads` | Create `#leads` and show the Netlify webhook URL. |
+| `!goals` / `!goal add <text>` | Read or update business goals. |
+| `!money` | Create `#money` for Jarvis's monthly revenue updates. |
+| `!archive <agent>` | Move a channel to Archive. `undo` to restore. |
+| `!gif <name>` | Post a reaction GIF (thinking, coding, done, money...). |
 | `!status` | Check the server is reachable. |
-| `!help` | Full command list. |
-
-### A typical day
-
-1. Morning: `!todos` to see what agents flagged overnight.
-2. `!run jarvis review the outstanding flags and delegate fixes` — Jarvis fans work out.
-3. Check `#activity-feed` as agents post their completed logs.
-4. Evening: `!jarvislog` so today's session is saved for tomorrow.
-
-With `!manage` running, most of this happens automatically.
 
 ---
 
-## Web dashboard
+## Providers
 
-Open **http://localhost:3333** for a browser UI — a grid of agent cards with status LEDs, memory log viewer, project file browser, and a live-streaming Run tab. Useful for long outputs that don't fit in Discord, or for running agents from your phone via a [Cloudflare Tunnel](#exposing-to-your-phone-cloudflare-tunnel).
+| Provider | Used for |
+|---|---|
+| Claude (Opus / Sonnet / Haiku) | Main provider. Jarvis orchestration, complex builds. Haiku for cheap sub-tasks. |
+| OpenAI Codex | Overflow when Claude usage is high. Good for code tasks. |
+| Gemini CLI | Free lane (1,000 req/day). Morning news, summaries, second opinions. |
+| Groq | Free, fast. Planning and text-only tasks. |
+| DeepSeek | Cheap API for simple edits when other providers are capped. |
+
+Jarvis automatically tracks which providers have headroom and routes accordingly. The target is around 75% on Claude before spilling to free providers, keeping reserve for the things that actually need it.
 
 ---
 
-## Getting started
+## Setup
 
-**Prerequisites:** Node.js 18+, [Claude Code](https://claude.com/claude-code) installed, a Discord bot token.
+**Prerequisites:** Node.js 18+, Claude Code installed, a Discord bot token.
 
 ```bash
 git clone https://github.com/lachydotmcg/ai-command-center
 cd ai-command-center
 npm install
-```
-
-**1. Configure your environment**
-
-```bash
 cp .env.example .env
+cp config.example.json config.json
 ```
 
-Edit `.env` and add your `DISCORD_TOKEN`. Copy `config.example.json` → `config.json` and set the paths for your machine (memory root, agent directories).
+Edit `.env` with your tokens. Edit `config.json` to point at your local directories.
 
-**2. Start the server**
+**Start everything:** double-click `start.bat` on Windows. Launches the server, Discord bot, ngrok tunnel, and opens the dashboard.
 
-```bash
-npm start          # server only
-npm run bot        # Discord bot only
+**Always-on:** double-click `tray.cmd` to put the ACC in your system tray. Right-click the icon for Start / Restart / Stop. Run `install-startup.ps1` once to launch it automatically at Windows login.
+
+**Invite the bot:** generate an OAuth2 invite URL for your bot with these permissions: Read Messages, Send Messages, Manage Channels, Read Message History.
+
+**First run in Discord:**
+```
+!sync        creates all the categories and channels
+!board       live status board
+!mirror      streams agent output into their channels
+!manage 60   Jarvis starts managing every 60 minutes
 ```
 
-On Windows, double-click **`start.bat`** — launches the server, bot, and browser together.
+---
 
-**3. Invite the bot to your Discord server**
+## Webhooks
 
-Required permissions: Read Messages, Send Messages, Manage Channels, Read Message History.
+**Netlify forms**
+Run `!leads` in Discord to get your webhook URL. Paste it into Netlify at Site Settings > Forms > Form Notifications > Outgoing webhook. Every submission posts to `#leads` and Jarvis triages it.
 
-**4. Set up channels**
+**Phone access and external webhooks**
+The server runs locally. For phone access, ngrok runs automatically with `start.bat` using a static domain configured in `~/.config/ngrok/ngrok.yml`.
 
-Run `!sync` in Discord — the bot creates a `🤖 Core Agents` category and a `🌐 Web Dev Clients` category with a channel per agent. Then `!board` and `!activity` to get live feeds.
-
-**5. Start the manager**
-
-```
-!manage 60
-!mirror
-```
-
-Jarvis will review to-dos and delegate work every 60 minutes. All output mirrors into agent channels.
+**Security**
+Set `ACC_SECRET` in `.env` before exposing the server. All API routes require the bearer token once it is set. The dashboard and Discord bot handle auth automatically. Set `ACC_FORM_KEY` separately for the public form webhook endpoint.
 
 ---
 
 ## Configuration
 
-Override any setting via **environment variables** or an optional **`config.json`** (copy `config.example.json`). Precedence: env var → `config.json` → built-in default.
-
-| Setting | Env var | `config.json` key | Default |
-|---------|---------|-------------------|---------|
-| Server port | `ACC_PORT` | `port` | `3333` |
-| Memory logs root | `ACC_MEMORY_ROOT` | `memoryRoot` | `…/Obsidian/Lachy/agent-memory` |
-| Auth token | `ACC_SECRET` | `secret` | _(none — open)_ |
-| `claude` executable | `ACC_CLAUDE_EXE` | `claudeExe` | auto-detected |
-| `codex` executable | `ACC_CODEX_EXE` | `codexExe` | auto-detected |
-| Codex sandbox | `ACC_CODEX_SANDBOX` | `codexSandbox` | `workspace-write` |
-| Codex full-disk read | `ACC_CODEX_DISK_FULL_READ` | `codexDiskFullRead` | `true` |
-| Manager day start hour | `ACC_DAY_START` | `dayStart` | `8` |
-| Manager day end hour | `ACC_DAY_END` | `dayEnd` | `22` |
-| Daily Claude budget (soft) | `ACC_DAILY_BUDGET` | `dailyBudget` | `$5` |
-| Claude usage target | `ACC_USAGE_TARGET` | `usageTarget` | `0.75` (75%) |
-| New agent base dir | `ACC_NEW_AGENT_BASE` | `newAgentBase` | `…/Lachys Web Dev` |
-| Agent → directory map | — | `agents` | built-in list |
-| Form webhook key | `ACC_FORM_KEY` | `formKey` | _(none — triage off unless set)_ |
-| Lead-triage provider | `ACC_LEAD_PROVIDER` | `leadProvider` | `claude` |
-
-Agents are discovered two ways: explicit entries in the `agents` map plus any subfolder under the memory root. An agent's memory log path:
-
-```
-<memoryRoot>/<agent-name>/YYYY-MM-DD.md
-```
-
----
-
-## Exposing to your phone (Cloudflare Tunnel)
-
-```bash
-# 1. Install (one time)
-winget install cloudflare.cloudflared
-
-# 2. Set a secret — the server runs claude on your PC
-$env:ACC_SECRET = "some-long-random-string"
-node server.js
-
-# 3. Start the tunnel
-cloudflared tunnel --url http://localhost:3333
-```
-
-Cloudflare prints a `https://random-words.trycloudflare.com` URL. Bookmark it on your phone.
-
----
-
-## API endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/status` | open | Heartbeat `{ ok, time, authRequired }` |
-| GET | `/agents` | ✓ | Agent names |
-| GET | `/agents/meta` | ✓ | Agents with directory + group |
-| GET | `/logs/:agent` | ✓ | Latest memory log |
-| GET | `/logs/:agent/all` | ✓ | All log filenames |
-| GET | `/files/:agent?dir=` | ✓ | Browse project directory |
-| GET | `/file/:agent?p=` | ✓ | Read a project file |
-| GET | `/memory/:agent/:file` | ✓ | Read a specific memory log |
-| GET | `/history/:agent` | ✓ | Last Claude Code conversation |
-| GET | `/runs` | ✓ | Live run registry |
-| GET | `/runs/:id` | ✓ | Single run detail |
-| GET | `/usage` | ✓ | Claude/Codex usage snapshot |
-| GET | `/todos` | ✓ | Outstanding flags + blockers |
-| POST | `/run` | ✓ | Run an agent (SSE stream) |
-| POST | `/dispatch` | ✓ | One-shot agent run (JSON) |
-| POST | `/swarm` | ✓ | Parallel multi-agent run |
-| POST | `/new-agent` | ✓ | Scaffold a new agent |
-| POST | `/schedule` | ✓ | Create a scheduled task |
-| GET | `/schedule` | ✓ | List scheduled tasks |
-| DELETE | `/schedule/:id` | ✓ | Cancel a scheduled task |
-| POST | `/discord-op` | ✓ | Queue a Discord channel op |
-| GET | `/discord-ops` | ✓ | List pending Discord ops |
-| GET | `/business/:file` | ✓ | Read `goals` or `money` log |
-| POST | `/business/goals/append` | ✓ | Append a captured goal |
-| POST | `/webhook/form?key=` | open* | Website form → #leads + Jarvis auto-triage (*key-guarded) |
-
-"✓" routes require the `ACC_SECRET` bearer token **only when a secret is configured**.
+| Setting | Env var | Default |
+|---|---|---|
+| Server port | `ACC_PORT` | `3333` |
+| Auth token | `ACC_SECRET` | none (open) |
+| Memory logs root | `ACC_MEMORY_ROOT` | `Obsidian/Lachy/agent-memory` |
+| Daily Claude budget | `ACC_DAILY_BUDGET` | `$5` |
+| Claude usage target | `ACC_USAGE_TARGET` | `0.75` |
+| Codex sandbox | `ACC_CODEX_SANDBOX` | `workspace-write` |
+| Gemini model | `ACC_GEMINI_MODEL` | `gemini-2.5-flash` |
+| Groq model | `ACC_GROQ_MODEL` | `llama-3.3-70b-versatile` |
+| Form webhook key | `ACC_FORM_KEY` | none |
+| Manager day start | `ACC_DAY_START` | `8` |
+| Manager day end | `ACC_DAY_END` | `22` |
 
 ---
 
 ## Project layout
 
-| File | Purpose |
-|------|---------|
-| `server.js` | Express server — agent API, runner, scheduler, Discord ops queue |
-| `index.html` | Browser dashboard — vanilla JS, no build step |
-| `discord-bot.js` | Discord bot — commands, status board, activity feed, run mirror |
-| `agent-cli.mjs` | CLI used by agents to delegate sub-tasks to each other |
-| `config.example.json` | Template for local path/agent configuration |
-| `.env.example` | Template for secrets and tokens |
+| File | What it is |
+|---|---|
+| `server.js` | Express server: agent runner, scheduler, webhooks, provider routing |
+| `discord-bot.js` | Discord bot: all commands, status board, run mirroring, GIFs |
+| `agent-cli.mjs` | CLI for agents to delegate work to each other |
+| `index.html` | Browser dashboard |
+| `tray.ps1` | Windows tray controller |
+| `start.bat` | Launches everything together |
+| `install-startup.ps1` | Adds tray to Windows startup (no admin needed) |
+| `config.example.json` | Template for local path config |
+| `.env.example` | Template for secrets |
 
 ---
-
-## License
 
 MIT

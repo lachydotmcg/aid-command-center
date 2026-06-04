@@ -438,14 +438,14 @@ let agentData={}, currentAgent=null, currentTab='memory'
 let elapsedTimer=null
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
-// Server is open by default; if ACC_SECRET is set it returns 401 and we prompt
+// Server is open by default; if ACC auth is set it returns 401 and we prompt
 // once for a token, then persist it in localStorage for future requests.
 const TOKEN_KEY='acc_token'
 let authToken=localStorage.getItem(TOKEN_KEY)||''
 function authHeaders(extra){const h=extra||{};return authToken?{...h,Authorization:'Bearer '+authToken}:h}
 function setToken(t){authToken=(t||'').trim();authToken?localStorage.setItem(TOKEN_KEY,authToken):localStorage.removeItem(TOKEN_KEY)}
 function promptToken(){
-  const t=prompt('This server requires an access token (ACC_SECRET):',authToken)
+  const t=prompt('This server requires an access token (ACC_SECRET/ACC_TOKEN):',authToken)
   if(t==null) return false
   setToken(t); return !!authToken
 }
@@ -679,7 +679,7 @@ async function replyToRun(replyText) {
   runController = new AbortController()
   let fullText = ''
   try {
-    const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'},
+    const res = await fetch('/run', { method:'POST', headers:authHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({ agent: currentAgent, prompt: replyText, continueSession: true }),
       signal: runController.signal })
     if (!res.ok) { appendRun(`ERR: ${res.status}`, 'err'); return }

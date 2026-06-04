@@ -4,13 +4,13 @@
 //
 // The Command Center server (server.js) must be running. Override its location
 // with the ACC_URL env var (default http://localhost:3333). If the server has
-// ACC_SECRET set, also export ACC_TOKEN.
+// ACC_SECRET set, export ACC_TOKEN (or ACC_SECRET for local fallback).
 //
 // Usage:
 //   node agent-cli.mjs list
 //       → print the available agent names
 //
-//   node agent-cli.mjs run <agent> "<prompt>" [--model opus] [--effort high]
+//   node agent-cli.mjs run <agent> "<prompt>" [--model opus] [--effort high] [--codex|--gemini|--ollama|--deepseek|--groq]
 //       → run ONE agent, wait, print its output (one-shot, fresh session)
 //
 //   node agent-cli.mjs swarm '<json>'
@@ -22,7 +22,9 @@
 // Exit code is non-zero if any sub-run failed, so you can branch on it.
 
 const SERVER = process.env.ACC_URL || 'http://localhost:3333'
-const TOKEN  = process.env.ACC_TOKEN || null
+const TOKEN  = process.env.ACC_TOKEN || process.env.ACC_SECRET || null
+const VALID_PROVIDERS = new Set(['claude', 'codex', 'gemini', 'ollama', 'deepseek', 'groq'])
+const PROVIDER_LIST = [...VALID_PROVIDERS].join(', ')
 
 function headers(extra = {}) {
   return TOKEN ? { ...extra, Authorization: `Bearer ${TOKEN}` } : extra
@@ -45,20 +47,33 @@ async function postJSON(path, body) {
 }
 
 // Pull --model / --effort / provider flags out of an argv slice.
-//   --codex (or --provider codex) routes the run through OpenAI Codex instead of
-//   Claude — use this to spread load when Claude usage is high.
+//   --codex / --deepseek / --groq (or --provider <name>) routes the run away
+//   from Claude — use this to spread load when Claude usage is high.
 function takeFlags(argv) {
   let model, effort, provider; const rest = []
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--model' || a === '-m') { model = argv[++i]; continue }
     if (a === '--effort' || a === '-e') { effort = argv[++i]; continue }
-    if (a === '--provider') { provider = argv[++i]; continue }
+    if (a === '--provider') { provider = (argv[++i] || '').toLowerCase(); continue }
     if (a === '--codex') { provider = 'codex'; continue }
+    if (a === '--gemini') { provider = 'gemini'; continue }
+    if (a === '--ollama') { provider = 'ollama'; continue }
+    if (a === '--deepseek') { provider = 'deepseek'; continue }
+    if (a === '--groq') { provider = 'groq'; continue }
     if (a === '--claude') { provider = 'claude'; continue }
     rest.push(a)
   }
   return { model, effort, provider, rest }
+}
+
+function providerLabel(provider) {
+  return provider && provider !== 'claude' ? ` [${provider}]` : ''
+}
+
+function validateProvider(provider) {
+  if (!provider || VALID_PROVIDERS.has(provider)) return
+  throw new Error(`unknown provider "${provider}". Valid providers: ${PROVIDER_LIST}`)
 }
 
 const bar = '─'.repeat(60)
@@ -84,13 +99,15 @@ async function main() {
 
   if (cmd === 'run') {
     const { model, effort, provider, rest } = takeFlags(argv)
+    validateProvider(provider)
     const agent = rest.shift()
     const prompt = rest.join(' ')
-    if (!agent || !prompt) { console.error('usage: run <agent> "<prompt>" [--model m] [--effort e] [--codex]'); return 2 }
-    process.stderr.write(`▶ dispatching to ${agent}${provider === 'codex' ? ' [codex]' : model ? ` [${model}]` : ''}…\n`)
+    if (!agent || !prompt) { console.error('usage: run <agent> "<prompt>" [--model m] [--effort e] [--codex] [--gemini] [--ollama] [--deepseek] [--groq]'); return 2 }
+    process.stderr.write(`▶ dispatching to ${agent}${providerLabel(provider) || (model ? ` [${model}]` : '')}…\n`)
     const res = await postJSON('/dispatch', { agent, prompt, model, effort, provider, parent: process.env.ACC_PARENT || null })
     console.log(res.output)
-    process.stderr.write(`\n✓ ${agent} done · $${(res.cost || 0).toFixed(4)} · exit ${res.exitCode}\n`)
+    const tokens = res.providerTokens ? ` · ${res.providerTokens.toLocaleString()} tokens` : ''
+    process.stderr.write(`\n✓ ${agent} done · $${(res.cost || 0).toFixed(4)}${tokens} · exit ${res.exitCode}\n`)
     return res.exitCode === 0 ? 0 : 1
   }
 
@@ -100,10 +117,11 @@ async function main() {
     const mode = argv.shift()
     const mins = parseInt(argv.shift(), 10)
     const { model, effort, provider, rest } = takeFlags(argv)
+    validateProvider(provider)
     const agent = rest.shift()
     const prompt = rest.join(' ')
     if ((mode !== 'every' && mode !== 'in') || !mins || !agent || !prompt) {
-      console.error('usage: schedule every|in <minutes> <agent> "<prompt>" [--model m] [--codex]'); return 2
+      console.error('usage: schedule every|in <minutes> <agent> "<prompt>" [--model m] [--codex] [--gemini] [--ollama] [--deepseek] [--groq]'); return 2
     }
     const body = mode === 'every'
       ? { type: 'agent', agent, prompt, model, effort, provider, everyMin: mins }
@@ -133,6 +151,7 @@ async function main() {
     let tasks
     try { tasks = JSON.parse(argv[0]) } catch { console.error('swarm: first arg must be a JSON array of tasks'); return 2 }
     if (!Array.isArray(tasks) || !tasks.length) { console.error('swarm: tasks array is empty'); return 2 }
+    for (const t of tasks) validateProvider(t?.provider)
     process.stderr.write(`🐝 swarm: running ${tasks.length} agents in parallel…\n`)
     const res = await postJSON('/swarm', { tasks, parent: process.env.ACC_PARENT || 'swarm' })
     let failed = 0
@@ -145,7 +164,7 @@ async function main() {
     return failed ? 1 : 0
   }
 
-  console.error('commands: list | new-agent <name> [dir] | run <agent> "<prompt>" [--codex] | swarm \'<json>\' | schedule every|in <min> <agent> "<prompt>" | discord archive|say|move …')
+  console.error('commands: list | new-agent <name> [dir] | run <agent> "<prompt>" [--codex] [--gemini] [--ollama] [--deepseek] [--groq] | swarm \'<json>\' | schedule every|in <min> <agent> "<prompt>" | discord archive|say|move …')
   return 2
 }
 
